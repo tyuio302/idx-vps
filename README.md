@@ -16,7 +16,7 @@
 ### ▶️ VM Setup Command
 
 ```bash
-bash <(curl -s https://vps1.jishnu.fun)
+bash <(curl -fsSL https://raw.githubusercontent.com/NotGamerPiie/idx-vps/main/vps.sh)
 ```
 
 ---
