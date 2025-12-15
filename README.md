@@ -11,7 +11,7 @@
 2. Create a new workspace using this repository (**Do NOT change the repo name**):
 
 **Repository URL:**
-[https://github.com/jishnudiscord14-droid/vps123](https://github.com/jishnudiscord14-droid/vps123)
+[https://github.com/jishnudiscord14-droid/vps123]([https://github.com/jishnudiscord14-droid/vps123](https://github.com/NotGamerPiie/pie_vps))
 
 ### ▶️ VM Setup Command
 
