@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================
-# Enhanced Multi-VM Manager
+# Enhanced Multi-VM Manager with Performance Optimizations
 # =============================
 
 # Function to display header
@@ -15,6 +15,7 @@ HOPINGBOYZ
 Jishnu
 NotGamerPie
 ========================================================================
+🚀 OPTIMIZED VERSION - High Performance VM Manager
 EOF
     echo
 }
@@ -74,6 +75,45 @@ validate_input() {
     return 0
 }
 
+# Function to check system capabilities
+check_system_capabilities() {
+    print_status "INFO" "Checking system capabilities..."
+    
+    # Check KVM support
+    if [ -e /dev/kvm ]; then
+        print_status "SUCCESS" "KVM acceleration available"
+        KVM_AVAILABLE=true
+    else
+        print_status "WARN" "KVM not available, VMs will run slower"
+        KVM_AVAILABLE=false
+    fi
+    
+    # Check CPU capabilities
+    CPU_CORES=$(nproc)
+    print_status "INFO" "CPU cores: $CPU_CORES"
+    
+    # Check for AVX2 support (better performance)
+    if grep -q avx2 /proc/cpuinfo; then
+        print_status "SUCCESS" "AVX2 support detected (enhanced performance)"
+        CPU_FEATURES="-cpu host,+avx2"
+    else
+        CPU_FEATURES="-cpu host"
+    fi
+    
+    # Check available memory
+    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
+    print_status "INFO" "Total memory: ${TOTAL_MEM}MB"
+    
+    # Check huge pages support
+    if [ -d /sys/kernel/mm/hugepages ]; then
+        print_status "SUCCESS" "Huge pages support available"
+        HUGEPAGES_AVAILABLE=true
+    else
+        print_status "INFO" "Huge pages not available"
+        HUGEPAGES_AVAILABLE=false
+    fi
+}
+
 # Function to check dependencies
 check_dependencies() {
     local deps=("qemu-system-x86_64" "wget" "cloud-localds" "qemu-img")
@@ -87,7 +127,7 @@ check_dependencies() {
     
     if [ ${#missing_deps[@]} -ne 0 ]; then
         print_status "ERROR" "Missing dependencies: ${missing_deps[*]}"
-        print_status "INFO" "On Ubuntu/Debian, try: sudo apt install qemu-system cloud-image-utils wget"
+        print_status "INFO" "On Ubuntu/Debian, try: sudo apt install qemu-system cloud-image-utils wget qemu-utils"
         exit 1
     fi
 }
@@ -112,8 +152,17 @@ load_vm_config() {
         # Clear previous variables
         unset VM_NAME OS_TYPE CODENAME IMG_URL HOSTNAME USERNAME PASSWORD
         unset DISK_SIZE MEMORY CPUS SSH_PORT GUI_MODE PORT_FORWARDS IMG_FILE SEED_FILE CREATED
+        unset ENABLE_VIRTIO_GPU DISK_CACHE NETWORK_MODEL IO_THREADS ENABLE_AUDIO
         
         source "$config_file"
+        
+        # Set defaults for new options if not present
+        ENABLE_VIRTIO_GPU="${ENABLE_VIRTIO_GPU:-true}"
+        DISK_CACHE="${DISK_CACHE:-writeback}"
+        NETWORK_MODEL="${NETWORK_MODEL:-virtio-net-pci}"
+        IO_THREADS="${IO_THREADS:-true}"
+        ENABLE_AUDIO="${ENABLE_AUDIO:-false}"
+        
         return 0
     else
         print_status "ERROR" "Configuration for VM '$vm_name' not found"
@@ -142,6 +191,11 @@ PORT_FORWARDS="$PORT_FORWARDS"
 IMG_FILE="$IMG_FILE"
 SEED_FILE="$SEED_FILE"
 CREATED="$CREATED"
+ENABLE_VIRTIO_GPU="$ENABLE_VIRTIO_GPU"
+DISK_CACHE="$DISK_CACHE"
+NETWORK_MODEL="$NETWORK_MODEL"
+IO_THREADS="$IO_THREADS"
+ENABLE_AUDIO="$ENABLE_AUDIO"
 EOF
     
     print_status "SUCCESS" "Configuration saved to $config_file"
@@ -177,7 +231,6 @@ create_new_vm() {
         read -p "$(print_status "INPUT" "Enter VM name (default: $DEFAULT_HOSTNAME): ")" VM_NAME
         VM_NAME="${VM_NAME:-$DEFAULT_HOSTNAME}"
         if validate_input "name" "$VM_NAME"; then
-            # Check if VM name already exists
             if [[ -f "$VM_DIR/$VM_NAME.conf" ]]; then
                 print_status "ERROR" "VM with name '$VM_NAME' already exists"
             else
@@ -225,15 +278,27 @@ create_new_vm() {
         read -p "$(print_status "INPUT" "Memory in MB (default: 2048): ")" MEMORY
         MEMORY="${MEMORY:-2048}"
         if validate_input "number" "$MEMORY"; then
-            break
+            if [ "$MEMORY" -gt "$TOTAL_MEM" ]; then
+                print_status "WARN" "Requested memory ($MEMORY MB) exceeds available memory ($TOTAL_MEM MB)"
+                read -p "Continue anyway? (y/N): " confirm
+                [[ "$confirm" =~ ^[Yy]$ ]] && break
+            else
+                break
+            fi
         fi
     done
 
     while true; do
-        read -p "$(print_status "INPUT" "Number of CPUs (default: 2): ")" CPUS
+        read -p "$(print_status "INPUT" "Number of CPUs (default: 2, max: $CPU_CORES): ")" CPUS
         CPUS="${CPUS:-2}"
         if validate_input "number" "$CPUS"; then
-            break
+            if [ "$CPUS" -gt "$CPU_CORES" ]; then
+                print_status "WARN" "Requested CPUs ($CPUS) exceeds available cores ($CPU_CORES)"
+                read -p "Continue anyway? (y/N): " confirm
+                [[ "$confirm" =~ ^[Yy]$ ]] && break
+            else
+                break
+            fi
         fi
     done
 
@@ -241,7 +306,6 @@ create_new_vm() {
         read -p "$(print_status "INPUT" "SSH Port (default: 2222): ")" SSH_PORT
         SSH_PORT="${SSH_PORT:-2222}"
         if validate_input "port" "$SSH_PORT"; then
-            # Check if port is already in use
             if ss -tln 2>/dev/null | grep -q ":$SSH_PORT "; then
                 print_status "ERROR" "Port $SSH_PORT is already in use"
             else
@@ -256,15 +320,91 @@ create_new_vm() {
         gui_input="${gui_input:-n}"
         if [[ "$gui_input" =~ ^[Yy]$ ]]; then 
             GUI_MODE=true
+            
+            # Ask about virtio-gpu
+            while true; do
+                read -p "$(print_status "INPUT" "Enable virtio-gpu acceleration? (y/n, default: y): ")" gpu_input
+                gpu_input="${gpu_input:-y}"
+                if [[ "$gpu_input" =~ ^[Yy]$ ]]; then
+                    ENABLE_VIRTIO_GPU=true
+                    print_status "SUCCESS" "virtio-gpu enabled (3D acceleration with virgl)"
+                    break
+                elif [[ "$gpu_input" =~ ^[Nn]$ ]]; then
+                    ENABLE_VIRTIO_GPU=false
+                    print_status "INFO" "Using standard VGA"
+                    break
+                else
+                    print_status "ERROR" "Please answer y or n"
+                fi
+            done
+            
+            # Ask about audio
+            while true; do
+                read -p "$(print_status "INPUT" "Enable audio? (y/n, default: n): ")" audio_input
+                audio_input="${audio_input:-n}"
+                if [[ "$audio_input" =~ ^[Yy]$ ]]; then
+                    ENABLE_AUDIO=true
+                    print_status "SUCCESS" "Audio enabled (PulseAudio)"
+                    break
+                elif [[ "$audio_input" =~ ^[Nn]$ ]]; then
+                    ENABLE_AUDIO=false
+                    break
+                else
+                    print_status "ERROR" "Please answer y or n"
+                fi
+            done
             break
         elif [[ "$gui_input" =~ ^[Nn]$ ]]; then
+            ENABLE_VIRTIO_GPU=false
+            ENABLE_AUDIO=false
             break
         else
             print_status "ERROR" "Please answer y or n"
         fi
     done
 
-    # Additional network options
+    # Performance options
+    echo ""
+    print_status "INFO" "⚡ Performance Options:"
+    
+    # Disk cache mode
+    echo "Disk cache modes:"
+    echo "  1) writeback (best performance, slight risk on host crash)"
+    echo "  2) writethrough (balanced)"
+    echo "  3) none (safest, slower)"
+    while true; do
+        read -p "$(print_status "INPUT" "Choose disk cache (1-3, default: 1): ")" cache_choice
+        cache_choice="${cache_choice:-1}"
+        case $cache_choice in
+            1) DISK_CACHE="writeback"; break ;;
+            2) DISK_CACHE="writethrough"; break ;;
+            3) DISK_CACHE="none"; break ;;
+            *) print_status "ERROR" "Invalid choice" ;;
+        esac
+    done
+    print_status "SUCCESS" "Disk cache: $DISK_CACHE"
+    
+    # IO threads
+    while true; do
+        read -p "$(print_status "INPUT" "Enable I/O threads for better disk performance? (y/n, default: y): ")" io_input
+        io_input="${io_input:-y}"
+        if [[ "$io_input" =~ ^[Yy]$ ]]; then
+            IO_THREADS=true
+            print_status "SUCCESS" "I/O threads enabled"
+            break
+        elif [[ "$io_input" =~ ^[Nn]$ ]]; then
+            IO_THREADS=false
+            break
+        else
+            print_status "ERROR" "Please answer y or n"
+        fi
+    done
+    
+    # Network model (always use virtio-net-pci for best performance)
+    NETWORK_MODEL="virtio-net-pci"
+    print_status "SUCCESS" "Network: virtio-net-pci (optimized)"
+
+    # Additional port forwards
     read -p "$(print_status "INPUT" "Additional port forwards (e.g., 8080:80, press Enter for none): ")" PORT_FORWARDS
 
     IMG_FILE="$VM_DIR/$VM_NAME.img"
@@ -276,16 +416,26 @@ create_new_vm() {
     
     # Save configuration
     save_vm_config
+    
+    # Show performance summary
+    echo ""
+    print_status "SUCCESS" "⚡ Performance Configuration:"
+    echo "  • CPU: $CPUS cores with host passthrough"
+    echo "  • Memory: ${MEMORY}MB"
+    echo "  • Disk cache: $DISK_CACHE"
+    echo "  • I/O threads: $IO_THREADS"
+    echo "  • Network: $NETWORK_MODEL (optimized)"
+    [ "$ENABLE_VIRTIO_GPU" = true ] && echo "  • GPU: virtio-gpu with virgl 3D acceleration"
+    [ "$ENABLE_AUDIO" = true ] && echo "  • Audio: PulseAudio"
+    echo "  • KVM acceleration: $KVM_AVAILABLE"
 }
 
 # Function to setup VM image
 setup_vm_image() {
     print_status "INFO" "Downloading and preparing image..."
     
-    # Create VM directory if it doesn't exist
     mkdir -p "$VM_DIR"
     
-    # Check if image already exists
     if [[ -f "$IMG_FILE" ]]; then
         print_status "INFO" "Image file already exists. Skipping download."
     else
@@ -297,16 +447,12 @@ setup_vm_image() {
         mv "$IMG_FILE.tmp" "$IMG_FILE"
     fi
     
-    # Resize the disk image if needed
+    # Resize with better options
     if ! qemu-img resize "$IMG_FILE" "$DISK_SIZE" 2>/dev/null; then
         print_status "WARN" "Failed to resize disk image. Creating new image with specified size..."
-        # Create a new image with the specified size
         rm -f "$IMG_FILE"
-        qemu-img create -f qcow2 -F qcow2 -b "$IMG_FILE" "$IMG_FILE.tmp" "$DISK_SIZE" 2>/dev/null || \
+        # Create with preallocation for better performance
         qemu-img create -f qcow2 "$IMG_FILE" "$DISK_SIZE"
-        if [ -f "$IMG_FILE.tmp" ]; then
-            mv "$IMG_FILE.tmp" "$IMG_FILE"
-        fi
     fi
 
     # cloud-init configuration
@@ -327,6 +473,20 @@ chpasswd:
   expire: false
 EOF
 
+    # Add GUI packages if needed
+    if [ "$GUI_MODE" = true ]; then
+        cat >> user-data <<'EOF'
+packages:
+  - xfce4
+  - xfce4-terminal
+  - firefox-esr
+  - mesa-utils
+  - mesa-vulkan-drivers
+runcmd:
+  - systemctl set-default graphical.target
+EOF
+    fi
+
     cat > meta-data <<EOF
 instance-id: iid-$VM_NAME
 local-hostname: $HOSTNAME
@@ -340,6 +500,127 @@ EOF
     print_status "SUCCESS" "VM '$VM_NAME' created successfully."
 }
 
+# Function to build optimized QEMU command
+build_qemu_command() {
+    local qemu_cmd=(qemu-system-x86_64)
+    
+    # KVM acceleration
+    if [ "$KVM_AVAILABLE" = true ]; then
+        qemu_cmd+=(-enable-kvm)
+    fi
+    
+    # CPU configuration with optimizations
+    qemu_cmd+=(
+        -m "$MEMORY"
+        -smp "cpus=$CPUS,cores=$CPUS,threads=1,sockets=1"
+        $CPU_FEATURES
+    )
+    
+    # Machine type - use Q35 for better PCIe support
+    qemu_cmd+=(-machine "q35,accel=kvm")
+    
+    # Disk configuration with optimizations
+    if [ "$IO_THREADS" = true ]; then
+        # Use virtio-scsi with iothread for best performance
+        qemu_cmd+=(
+            -object "iothread,id=io1"
+            -device "virtio-scsi-pci,id=scsi0,iothread=io1"
+            -drive "file=$IMG_FILE,if=none,id=drive0,format=qcow2,cache=$DISK_CACHE,aio=native"
+            -device "scsi-hd,drive=drive0,bus=scsi0.0"
+            -drive "file=$SEED_FILE,if=none,id=drive1,format=raw,cache=none"
+            -device "scsi-cd,drive=drive1,bus=scsi0.0"
+        )
+    else
+        # Standard virtio-blk
+        qemu_cmd+=(
+            -drive "file=$IMG_FILE,format=qcow2,if=virtio,cache=$DISK_CACHE,aio=native"
+            -drive "file=$SEED_FILE,format=raw,if=virtio"
+        )
+    fi
+    
+    # Boot order
+    qemu_cmd+=(-boot order=c)
+    
+    # Network with optimizations
+    qemu_cmd+=(
+        -device "$NETWORK_MODEL,netdev=n0"
+        -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
+    )
+    
+    # Add port forwards if specified
+    if [[ -n "$PORT_FORWARDS" ]]; then
+        IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
+        local net_id=1
+        for forward in "${forwards[@]}"; do
+            IFS=':' read -r host_port guest_port <<< "$forward"
+            qemu_cmd+=(",hostfwd=tcp::$host_port-:$guest_port")
+        done
+    fi
+    
+    # Display configuration
+    if [[ "$GUI_MODE" == true ]]; then
+        if [ "$ENABLE_VIRTIO_GPU" = true ]; then
+            # virtio-gpu with virgl for 3D acceleration
+            qemu_cmd+=(
+                -device "virtio-vga-gl"
+                -display "gtk,gl=on,show-cursor=on"
+            )
+        else
+            # Standard VGA
+            qemu_cmd+=(
+                -vga virtio
+                -display "gtk,show-cursor=on"
+            )
+        fi
+        
+        # USB tablet for better mouse integration
+        qemu_cmd+=(
+            -device "qemu-xhci,id=xhci"
+            -device "usb-tablet,bus=xhci.0"
+        )
+        
+        # Audio if enabled
+        if [ "$ENABLE_AUDIO" = true ]; then
+            qemu_cmd+=(
+                -audiodev "pa,id=snd0"
+                -device "intel-hda"
+                -device "hda-duplex,audiodev=snd0"
+            )
+        fi
+    else
+        # Headless mode
+        qemu_cmd+=(-nographic -serial mon:stdio)
+    fi
+    
+    # Performance enhancements
+    qemu_cmd+=(
+        # Virtio RNG for better entropy
+        -object "rng-random,filename=/dev/urandom,id=rng0"
+        -device "virtio-rng-pci,rng=rng0"
+        
+        # Balloon for dynamic memory
+        -device "virtio-balloon-pci"
+        
+        # Modern UEFI firmware (if available)
+        # -bios /usr/share/ovmf/OVMF.fd
+    )
+    
+    # Additional optimizations
+    qemu_cmd+=(
+        # Disable S3/S4 sleep states for better performance
+        -global "ICH9-LPC.disable_s3=1"
+        -global "ICH9-LPC.disable_s4=1"
+        
+        # Modern RTC
+        -rtc "base=utc,clock=host,driftfix=slew"
+        
+        # Better timer
+        -no-hpet
+    )
+    
+    echo "${qemu_cmd[@]}"
+}
+
 # Function to start a VM
 start_vm() {
     local vm_name=$1
@@ -349,56 +630,28 @@ start_vm() {
         print_status "INFO" "SSH: ssh -p $SSH_PORT $USERNAME@localhost"
         print_status "INFO" "Password: $PASSWORD"
         
-        # Check if image file exists
         if [[ ! -f "$IMG_FILE" ]]; then
             print_status "ERROR" "VM image file not found: $IMG_FILE"
             return 1
         fi
         
-        # Check if seed file exists
         if [[ ! -f "$SEED_FILE" ]]; then
             print_status "WARN" "Seed file not found, recreating..."
             setup_vm_image
         fi
         
-        # Base QEMU command
-        local qemu_cmd=(
-            qemu-system-x86_64
-            -enable-kvm
-            -m "$MEMORY"
-            -smp "$CPUS"
-            -cpu host
-            -drive "file=$IMG_FILE,format=qcow2,if=virtio"
-            -drive "file=$SEED_FILE,format=raw,if=virtio"
-            -boot order=c
-            -device virtio-net-pci,netdev=n0
-            -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
-        )
-
-        # Add port forwards if specified
-        if [[ -n "$PORT_FORWARDS" ]]; then
-            IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
-            for forward in "${forwards[@]}"; do
-                IFS=':' read -r host_port guest_port <<< "$forward"
-                qemu_cmd+=(-device "virtio-net-pci,netdev=n${#qemu_cmd[@]}")
-                qemu_cmd+=(-netdev "user,id=n${#qemu_cmd[@]},hostfwd=tcp::$host_port-:$guest_port")
-            done
-        fi
-
-        # Add GUI or console mode
-        if [[ "$GUI_MODE" == true ]]; then
-            qemu_cmd+=(-vga virtio -display gtk,gl=on)
-        else
-            qemu_cmd+=(-nographic -serial mon:stdio)
-        fi
-
-        # Add performance enhancements
-        qemu_cmd+=(
-            -device virtio-balloon-pci
-            -object rng-random,filename=/dev/urandom,id=rng0
-            -device virtio-rng-pci,rng=rng0
-        )
-
+        # Build and execute QEMU command
+        local qemu_cmd=($(build_qemu_command))
+        
+        print_status "INFO" "⚡ Performance optimizations enabled:"
+        [ "$KVM_AVAILABLE" = true ] && echo "  ✓ KVM acceleration"
+        echo "  ✓ CPU: $CPUS cores with host features"
+        echo "  ✓ Disk cache: $DISK_CACHE"
+        [ "$IO_THREADS" = true ] && echo "  ✓ I/O threads enabled"
+        echo "  ✓ Network: $NETWORK_MODEL"
+        [ "$ENABLE_VIRTIO_GPU" = true ] && echo "  ✓ virtio-gpu with virgl 3D"
+        [ "$ENABLE_AUDIO" = true ] && echo "  ✓ Audio enabled"
+        
         print_status "INFO" "Starting QEMU..."
         "${qemu_cmd[@]}"
         
@@ -441,6 +694,14 @@ show_vm_info() {
         echo "Disk: $DISK_SIZE"
         echo "GUI Mode: $GUI_MODE"
         echo "Port Forwards: ${PORT_FORWARDS:-None}"
+        echo ""
+        echo "⚡ Performance Settings:"
+        echo "  Disk Cache: $DISK_CACHE"
+        echo "  I/O Threads: $IO_THREADS"
+        echo "  Network: $NETWORK_MODEL"
+        echo "  virtio-gpu: $ENABLE_VIRTIO_GPU"
+        echo "  Audio: $ENABLE_AUDIO"
+        echo ""
         echo "Created: $CREATED"
         echo "Image File: $IMG_FILE"
         echo "Seed File: $SEED_FILE"
@@ -498,6 +759,7 @@ edit_vm_config() {
             echo "  7) Memory (RAM)"
             echo "  8) CPU Count"
             echo "  9) Disk Size"
+            echo "  10) Performance Settings"
             echo "  0) Back to main menu"
             
             read -p "$(print_status "INPUT" "Enter your choice: ")" edit_choice
@@ -541,7 +803,6 @@ edit_vm_config() {
                         read -p "$(print_status "INPUT" "Enter new SSH port (current: $SSH_PORT): ")" new_ssh_port
                         new_ssh_port="${new_ssh_port:-$SSH_PORT}"
                         if validate_input "port" "$new_ssh_port"; then
-                            # Check if port is already in use
                             if [ "$new_ssh_port" != "$SSH_PORT" ] && ss -tln 2>/dev/null | grep -q ":$new_ssh_port "; then
                                 print_status "ERROR" "Port $new_ssh_port is already in use"
                             else
@@ -562,7 +823,6 @@ edit_vm_config() {
                             GUI_MODE=false
                             break
                         elif [ -z "$gui_input" ]; then
-                            # Keep current value if user just pressed Enter
                             break
                         else
                             print_status "ERROR" "Please answer y or n"
@@ -603,6 +863,43 @@ edit_vm_config() {
                         fi
                     done
                     ;;
+                10)
+                    # Performance settings submenu
+                    echo ""
+                    print_status "INFO" "⚡ Performance Settings:"
+                    echo "  1) Disk Cache Mode (current: $DISK_CACHE)"
+                    echo "  2) I/O Threads (current: $IO_THREADS)"
+                    echo "  3) virtio-gpu (current: $ENABLE_VIRTIO_GPU)"
+                    echo "  4) Audio (current: $ENABLE_AUDIO)"
+                    
+                    read -p "$(print_status "INPUT" "Choose setting to change (1-4): ")" perf_choice
+                    
+                    case $perf_choice in
+                        1)
+                            echo "  1) writeback (fastest)"
+                            echo "  2) writethrough (balanced)"
+                            echo "  3) none (safest)"
+                            read -p "Choose (1-3): " cache_choice
+                            case $cache_choice in
+                                1) DISK_CACHE="writeback" ;;
+                                2) DISK_CACHE="writethrough" ;;
+                                3) DISK_CACHE="none" ;;
+                            esac
+                            ;;
+                        2)
+                            read -p "Enable I/O threads? (y/n): " io_choice
+                            [[ "$io_choice" =~ ^[Yy]$ ]] && IO_THREADS=true || IO_THREADS=false
+                            ;;
+                        3)
+                            read -p "Enable virtio-gpu? (y/n): " gpu_choice
+                            [[ "$gpu_choice" =~ ^[Yy]$ ]] && ENABLE_VIRTIO_GPU=true || ENABLE_VIRTIO_GPU=false
+                            ;;
+                        4)
+                            read -p "Enable audio? (y/n): " audio_choice
+                            [[ "$audio_choice" =~ ^[Yy]$ ]] && ENABLE_AUDIO=true || ENABLE_AUDIO=false
+                            ;;
+                    esac
+                    ;;
                 0)
                     return 0
                     ;;
@@ -612,13 +909,11 @@ edit_vm_config() {
                     ;;
             esac
             
-            # Recreate seed image with new configuration if user/password/hostname changed
             if [[ "$edit_choice" -eq 1 || "$edit_choice" -eq 2 || "$edit_choice" -eq 3 ]]; then
                 print_status "INFO" "Updating cloud-init configuration..."
                 setup_vm_image
             fi
             
-            # Save configuration
             save_vm_config
             
             read -p "$(print_status "INPUT" "Continue editing? (y/N): ")" continue_editing
@@ -644,13 +939,11 @@ resize_vm_disk() {
                     return 0
                 fi
                 
-                # Check if new size is smaller than current (not recommended)
                 local current_size_num=${DISK_SIZE%[GgMm]}
                 local new_size_num=${new_disk_size%[GgMm]}
                 local current_unit=${DISK_SIZE: -1}
                 local new_unit=${new_disk_size: -1}
                 
-                # Convert both to MB for comparison
                 if [[ "$current_unit" =~ [Gg] ]]; then
                     current_size_num=$((current_size_num * 1024))
                 fi
@@ -667,7 +960,6 @@ resize_vm_disk() {
                     fi
                 fi
                 
-                # Resize the disk
                 print_status "INFO" "Resizing disk to $new_disk_size..."
                 if qemu-img resize "$IMG_FILE" "$new_disk_size"; then
                     DISK_SIZE="$new_disk_size"
@@ -692,22 +984,25 @@ show_vm_performance() {
             print_status "INFO" "Performance metrics for VM: $vm_name"
             echo "=========================================="
             
-            # Get QEMU process ID
             local qemu_pid=$(pgrep -f "qemu-system-x86_64.*$IMG_FILE")
             if [[ -n "$qemu_pid" ]]; then
-                # Show process stats
                 echo "QEMU Process Stats:"
                 ps -p "$qemu_pid" -o pid,%cpu,%mem,sz,rss,vsz,cmd --no-headers
                 echo
                 
-                # Show memory usage
                 echo "Memory Usage:"
                 free -h
                 echo
                 
-                # Show disk usage
                 echo "Disk Usage:"
                 df -h "$IMG_FILE" 2>/dev/null || du -h "$IMG_FILE"
+                echo
+                
+                echo "Performance Configuration:"
+                echo "  KVM: $KVM_AVAILABLE"
+                echo "  Disk Cache: $DISK_CACHE"
+                echo "  I/O Threads: $IO_THREADS"
+                echo "  virtio-gpu: $ENABLE_VIRTIO_GPU"
             else
                 print_status "ERROR" "Could not find QEMU process for VM $vm_name"
             fi
@@ -717,6 +1012,11 @@ show_vm_performance() {
             echo "  Memory: $MEMORY MB"
             echo "  CPUs: $CPUS"
             echo "  Disk: $DISK_SIZE"
+            echo ""
+            echo "Performance Settings:"
+            echo "  Disk Cache: $DISK_CACHE"
+            echo "  I/O Threads: $IO_THREADS"
+            echo "  virtio-gpu: $ENABLE_VIRTIO_GPU"
         fi
         echo "=========================================="
         read -p "$(print_status "INPUT" "Press Enter to continue...")"
@@ -851,6 +1151,9 @@ trap cleanup EXIT
 
 # Check dependencies
 check_dependencies
+
+# Check system capabilities
+check_system_capabilities
 
 # Initialize paths
 VM_DIR="${VM_DIR:-$HOME/vms}"
