@@ -516,25 +516,38 @@ build_qemu_command() {
         $CPU_FEATURES
     )
     
-    # Machine type - use Q35 for better PCIe support
-    qemu_cmd+=(-machine "q35,accel=kvm")
+    # Machine type - use Q35 for better PCIe support with optimizations
+    local machine_opts="q35,hpet=off"
+    [ "$KVM_AVAILABLE" = true ] && machine_opts+=",accel=kvm"
+    qemu_cmd+=(-machine "$machine_opts")
     
     # Disk configuration with optimizations
     if [ "$IO_THREADS" = true ]; then
         # Use virtio-scsi with iothread for best performance
+        local aio_mode="threads"
+        # Use native AIO only with direct cache mode
+        if [ "$DISK_CACHE" = "none" ]; then
+            aio_mode="native"
+        fi
+        
         qemu_cmd+=(
             -object "iothread,id=io1"
             -device "virtio-scsi-pci,id=scsi0,iothread=io1"
-            -drive "file=$IMG_FILE,if=none,id=drive0,format=qcow2,cache=$DISK_CACHE,aio=native"
+            -drive "file=$IMG_FILE,if=none,id=drive0,format=qcow2,cache=$DISK_CACHE,aio=$aio_mode"
             -device "scsi-hd,drive=drive0,bus=scsi0.0"
-            -drive "file=$SEED_FILE,if=none,id=drive1,format=raw,cache=none"
+            -drive "file=$SEED_FILE,if=none,id=drive1,format=raw,cache=none,aio=threads"
             -device "scsi-cd,drive=drive1,bus=scsi0.0"
         )
     else
         # Standard virtio-blk
+        local aio_mode="threads"
+        if [ "$DISK_CACHE" = "none" ]; then
+            aio_mode="native"
+        fi
+        
         qemu_cmd+=(
-            -drive "file=$IMG_FILE,format=qcow2,if=virtio,cache=$DISK_CACHE,aio=native"
-            -drive "file=$SEED_FILE,format=raw,if=virtio"
+            -drive "file=$IMG_FILE,format=qcow2,if=virtio,cache=$DISK_CACHE,aio=$aio_mode"
+            -drive "file=$SEED_FILE,format=raw,if=virtio,cache=none"
         )
     fi
     
@@ -613,9 +626,6 @@ build_qemu_command() {
         
         # Modern RTC
         -rtc "base=utc,clock=host,driftfix=slew"
-        
-        # Better timer
-        -no-hpet
     )
     
     echo "${qemu_cmd[@]}"
