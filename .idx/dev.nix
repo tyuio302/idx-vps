@@ -7,21 +7,14 @@
     openssh
     git
     sudo
+    wget
+    curl
     
     # QEMU and VM tools
     qemu_kvm
     qemu
     cdrkit
     cloud-utils
-    
-    # Xorg dummy for GPU acceleration
-    xorg.xorgserver
-    xorg.xf86videodummy
-    xorg.xrandr
-    
-    # Additional utilities
-    wget
-    curl
   ];
 
   env = {
