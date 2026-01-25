@@ -113,17 +113,6 @@ check_system_capabilities() {
         print_status "WARN" "virtio-gpu-gl not available"
         VIRGL_AVAILABLE=false
     fi
-    
-    # Check Xorg availability
-    if command -v Xorg &> /dev/null; then
-        print_status "SUCCESS" "Xorg server available"
-        XORG_AVAILABLE=true
-    else
-        if [ "$VIRGL_AVAILABLE" = true ]; then
-            print_status "WARN" "Xorg not found - add to dev.nix"
-        fi
-        XORG_AVAILABLE=false
-    fi
 }
 
 # Function to check dependencies
@@ -146,8 +135,7 @@ check_dependencies() {
 
 # Function to cleanup temporary files
 cleanup() {
-    if [ -f "user-data" ]; then rm -f "user-data"; fi
-    if [ -f "meta-data" ]; then rm -f "meta-data"; fi
+    rm -f user-data meta-data 2>/dev/null
 }
 
 # Function to get all VM configurations
@@ -212,13 +200,29 @@ EOF
 setup_xorg_dummy() {
     print_status "INFO" "Setting up Xorg dummy..."
     
-    local xorg_conf="/tmp/xorg-dummy-${VM_NAME}.conf"
+    # Check if dummy driver exists
+    local dummy_driver=""
+    for path in /nix/store/*/lib/xorg/modules/drivers/dummy_drv.so; do
+        if [ -f "$path" ]; then
+            dummy_driver="$path"
+            break
+        fi
+    done
+    
+    if [ -z "$dummy_driver" ]; then
+        print_status "ERROR" "Dummy driver not found!"
+        print_status "INFO" "Add to dev.nix: xorg.xf86videodummy"
+        return 1
+    fi
+    
+    print_status "INFO" "Found driver: $dummy_driver"
+    
+    # Use relative path in current directory (not /tmp)
+    local xorg_conf="xorg-dummy-${VM_NAME}.conf"
     cat > "$xorg_conf" << 'EOF'
 Section "ServerLayout"
     Identifier "dummy_layout"
     Screen 0 "dummy_screen"
-    InputDevice "dummy_mouse"
-    InputDevice "dummy_keyboard"
 EndSection
 
 Section "Device"
@@ -234,26 +238,14 @@ Section "Screen"
     DefaultDepth 24
     SubSection "Display"
         Depth 24
-        Modes "1920x1080" "1600x900" "1280x720"
-        Virtual 1920 1080
+        Modes "1920x1080"
     EndSubSection
 EndSection
 
 Section "Monitor"
     Identifier "dummy_monitor"
-    HorizSync 15.0-100.0
-    VertRefresh 15.0-200.0
-    Modeline "1920x1080" 148.50 1920 2008 2052 2200 1080 1084 1089 1125 +hsync +vsync
-EndSection
-
-Section "InputDevice"
-    Identifier "dummy_mouse"
-    Driver "void"
-EndSection
-
-Section "InputDevice"
-    Identifier "dummy_keyboard"
-    Driver "void"
+    HorizSync 30.0-70.0
+    VertRefresh 50.0-75.0
 EndSection
 EOF
     
@@ -264,26 +256,36 @@ EOF
     done
     
     print_status "INFO" "Starting Xorg :$display_num..."
-    Xorg :$display_num -config "$xorg_conf" &> "/tmp/xorg-${VM_NAME}.log" &
+    
+    # Use relative path for config
+    Xorg :$display_num -config "$xorg_conf" -logfile "xorg-${VM_NAME}.log" &
     local xorg_pid=$!
     
-    sleep 2
+    print_status "INFO" "Waiting for Xorg (PID: $xorg_pid)..."
+    sleep 3
     
     if ps -p $xorg_pid > /dev/null 2>&1; then
-        print_status "SUCCESS" "Xorg started (PID: $xorg_pid)"
-        echo "$xorg_pid" > "/tmp/xorg-${VM_NAME}.pid"
+        print_status "SUCCESS" "Xorg started on :$display_num"
+        echo "$xorg_pid" > "xorg-${VM_NAME}.pid"
         echo ":$display_num"
         return 0
     else
-        print_status "ERROR" "Xorg failed to start"
-        [ -f "/tmp/xorg-${VM_NAME}.log" ] && cat "/tmp/xorg-${VM_NAME}.log"
+        print_status "ERROR" "Xorg failed to start!"
+        echo ""
+        print_status "ERROR" "=== Xorg Log ==="
+        if [ -f "xorg-${VM_NAME}.log" ]; then
+            tail -30 "xorg-${VM_NAME}.log"
+        else
+            echo "No log file found"
+        fi
+        print_status "ERROR" "================"
         return 1
     fi
 }
 
 # Function to stop Xorg dummy
 stop_xorg_dummy() {
-    local xorg_pid_file="/tmp/xorg-${VM_NAME}.pid"
+    local xorg_pid_file="xorg-${VM_NAME}.pid"
     if [ -f "$xorg_pid_file" ]; then
         local xorg_pid=$(cat "$xorg_pid_file")
         if ps -p $xorg_pid > /dev/null 2>&1; then
@@ -292,8 +294,8 @@ stop_xorg_dummy() {
             rm -f "$xorg_pid_file"
         fi
     fi
-    rm -f "/tmp/xorg-dummy-${VM_NAME}.conf"
-    rm -f "/tmp/xorg-${VM_NAME}.log"
+    rm -f "xorg-dummy-${VM_NAME}.conf"
+    rm -f "xorg-${VM_NAME}.log"
 }
 
 # Function to create new VM
@@ -405,13 +407,14 @@ create_new_vm() {
     done
 
     # GPU acceleration
-    if [ "$VIRGL_AVAILABLE" = true ] && [ "$XORG_AVAILABLE" = true ]; then
+    if [ "$VIRGL_AVAILABLE" = true ]; then
         while true; do
             read -p "$(print_status "INPUT" "Enable GPU (virtio-gpu)? (y/n): ")" gpu_input
             gpu_input="${gpu_input:-n}"
             if [[ "$gpu_input" =~ ^[Yy]$ ]]; then
                 ENABLE_VIRTIO_GPU=true
                 print_status "SUCCESS" "GPU enabled (virgl 3D)"
+                print_status "INFO" "Xorg dummy will auto-install in VM"
                 break
             elif [[ "$gpu_input" =~ ^[Nn]$ ]]; then
                 ENABLE_VIRTIO_GPU=false
@@ -420,8 +423,7 @@ create_new_vm() {
         done
     else
         ENABLE_VIRTIO_GPU=false
-        [ "$VIRGL_AVAILABLE" = false ] && print_status "INFO" "virtio-gpu not available"
-        [ "$XORG_AVAILABLE" = false ] && print_status "INFO" "Xorg not available"
+        print_status "INFO" "virtio-gpu not available"
     fi
 
     # Performance options
@@ -496,6 +498,7 @@ setup_vm_image() {
         qemu-img create -f qcow2 "$IMG_FILE" "$DISK_SIZE"
     }
 
+    # Base cloud-init config
     cat > user-data <<EOF
 #cloud-config
 hostname: $HOSTNAME
@@ -513,6 +516,64 @@ chpasswd:
   expire: false
 EOF
 
+    # Add Xorg dummy setup if GPU enabled
+    if [ "$ENABLE_VIRTIO_GPU" = true ]; then
+        cat >> user-data <<'XORG_EOF'
+packages:
+  - xserver-xorg-core
+  - xserver-xorg-video-dummy
+  - x11-xserver-utils
+  - mesa-utils
+
+write_files:
+  - path: /etc/X11/xorg.conf.d/20-dummy.conf
+    content: |
+      Section "Device"
+          Identifier "dummy_videocard"
+          Driver "dummy"
+          VideoRam 256000
+      EndSection
+      
+      Section "Monitor"
+          Identifier "dummy_monitor"
+          HorizSync 30.0-70.0
+          VertRefresh 50.0-75.0
+      EndSection
+      
+      Section "Screen"
+          Identifier "dummy_screen"
+          Device "dummy_videocard"
+          Monitor "dummy_monitor"
+          DefaultDepth 24
+          SubSection "Display"
+              Depth 24
+              Modes "1920x1080"
+          EndSubSection
+      EndSection
+
+  - path: /etc/systemd/system/xorg-dummy.service
+    content: |
+      [Unit]
+      Description=Xorg Dummy Display
+      After=network.target
+      
+      [Service]
+      Type=simple
+      ExecStart=/usr/bin/Xorg :0 -config /etc/X11/xorg.conf.d/20-dummy.conf
+      Restart=always
+      Environment="DISPLAY=:0"
+      
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl enable xorg-dummy
+  - systemctl start xorg-dummy
+  - echo "export DISPLAY=:0" >> /etc/environment
+XORG_EOF
+    fi
+
     cat > meta-data <<EOF
 instance-id: iid-$VM_NAME
 local-hostname: $HOSTNAME
@@ -524,6 +585,7 @@ EOF
     }
     
     print_status "SUCCESS" "VM image ready"
+    [ "$ENABLE_VIRTIO_GPU" = true ] && print_status "INFO" "Xorg dummy will auto-start in VM"
 }
 
 # Function to build QEMU command
@@ -583,9 +645,10 @@ build_qemu_command() {
     
     # Display
     if [ "$ENABLE_VIRTIO_GPU" = true ] && [ "$VIRGL_AVAILABLE" = true ]; then
+        # Use egl-headless for virgl without GUI window
         qemu_cmd+=(
             -device "virtio-vga-gl"
-            -display "sdl,gl=on"
+            -display "egl-headless,gl=on"
             -device "qemu-xhci,id=xhci"
             -device "usb-tablet,bus=xhci.0"
         )
@@ -674,7 +737,6 @@ stop_vm() {
             pkill -f "qemu-system-x86_64.*$IMG_FILE"
             sleep 2
             is_vm_running "$vm_name" && pkill -9 -f "qemu-system-x86_64.*$IMG_FILE"
-            stop_xorg_dummy
             print_status "SUCCESS" "VM stopped"
         else
             print_status "INFO" "VM not running"
@@ -813,9 +875,11 @@ edit_vm_config() {
                             [[ "$io_choice" =~ ^[Yy]$ ]] && IO_THREADS=true || IO_THREADS=false
                             ;;
                         3)
-                            if [ "$VIRGL_AVAILABLE" = true ] && [ "$XORG_AVAILABLE" = true ]; then
+                            if [ "$VIRGL_AVAILABLE" = true ]; then
                                 read -p "GPU (y/n): " gpu_choice
                                 [[ "$gpu_choice" =~ ^[Yy]$ ]] && ENABLE_VIRTIO_GPU=true || ENABLE_VIRTIO_GPU=false
+                            else
+                                print_status "INFO" "virtio-gpu not available"
                             fi
                             ;;
                     esac
