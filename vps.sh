@@ -643,14 +643,13 @@ build_qemu_command() {
         done
     fi
     
-    # Display configuration - CRITICAL FOR GPU
-    if [ "$ENABLE_VIRTIO_GPU" = true ] && [ "$VIRGL_AVAILABLE" = true ]; then
+    # Display configuration - GPU ALWAYS ENABLED if config says so
+    if [ "$ENABLE_VIRTIO_GPU" = "true" ]; then
         # virtio-vga-gl for GPU acceleration
         qemu_cmd+=(
             -device "virtio-vga-gl"
             -display "egl-headless"
         )
-        print_status "INFO" "GPU device added: virtio-vga-gl"
     else
         # Standard VGA without GPU acceleration
         qemu_cmd+=(
