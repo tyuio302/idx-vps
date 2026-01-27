@@ -2,176 +2,123 @@
 set -euo pipefail
 
 # =============================
-# Enhanced Multi-VM Manager with Performance Optimizations
-# NO APT/DPKG - Pure Nix packages
+# MAX PERFORMANCE VM Manager for IDX Google
+# virtio-gpu + Xorg dummy ENABLED BY DEFAULT
+# Pure Nix packages - NO APT/DPKG
 # =============================
 
-# Function to display header
 display_header() {
     clear
     cat << "EOF"
 ========================================================================
-Sponsor By These Guys!                                                                  
-HOPINGBOYZ
-Jishnu
-NotGamerPie
+🚀 MAX PERFORMANCE - virtio-gpu + Xorg dummy DEFAULT
+Sponsor By: HOPINGBOYZ, Jishnu, NotGamerPie
 ========================================================================
-🚀 OPTIMIZED VERSION - High Performance VM Manager
 EOF
     echo
 }
 
-# Function to display colored output
 print_status() {
-    local type=$1
-    local message=$2
-    
+    local type=$1 message=$2
     case $type in
         "INFO") echo -e "\033[1;34m[INFO]\033[0m $message" ;;
         "WARN") echo -e "\033[1;33m[WARN]\033[0m $message" ;;
         "ERROR") echo -e "\033[1;31m[ERROR]\033[0m $message" ;;
         "SUCCESS") echo -e "\033[1;32m[SUCCESS]\033[0m $message" ;;
         "INPUT") echo -e "\033[1;36m[INPUT]\033[0m $message" ;;
-        *) echo "[$type] $message" ;;
     esac
 }
 
-# Function to validate input
 validate_input() {
-    local type=$1
-    local value=$2
-    
+    local type=$1 value=$2
     case $type in
-        "number")
-            if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-                print_status "ERROR" "Must be a number"
-                return 1
-            fi
-            ;;
-        "size")
-            if ! [[ "$value" =~ ^[0-9]+[GgMm]$ ]]; then
-                print_status "ERROR" "Must be a size with unit (e.g., 100G, 512M)"
-                return 1
-            fi
-            ;;
-        "port")
-            if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 23 ] || [ "$value" -gt 65535 ]; then
-                print_status "ERROR" "Must be a valid port number (23-65535)"
-                return 1
-            fi
-            ;;
-        "name")
-            if ! [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-                print_status "ERROR" "VM name can only contain letters, numbers, hyphens, and underscores"
-                return 1
-            fi
-            ;;
-        "username")
-            if ! [[ "$value" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-                print_status "ERROR" "Username must start with a letter or underscore"
-                return 1
-            fi
-            ;;
+        "number") [[ "$value" =~ ^[0-9]+$ ]] || { print_status "ERROR" "Must be a number"; return 1; } ;;
+        "size") [[ "$value" =~ ^[0-9]+[GgMm]$ ]] || { print_status "ERROR" "Must be size (e.g., 100G)"; return 1; } ;;
+        "port") [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 23 ] && [ "$value" -le 65535 ] || { print_status "ERROR" "Invalid port (23-65535)"; return 1; } ;;
+        "name") [[ "$value" =~ ^[a-zA-Z0-9_-]+$ ]] || { print_status "ERROR" "Invalid name"; return 1; } ;;
+        "username") [[ "$value" =~ ^[a-z_][a-z0-9_-]*$ ]] || { print_status "ERROR" "Invalid username"; return 1; } ;;
     esac
-    return 0
 }
 
-# Function to check system capabilities
 check_system_capabilities() {
-    print_status "INFO" "Checking system capabilities..."
+    print_status "INFO" "⚡ Checking capabilities..."
     
-    # Check KVM support
+    # KVM
     if [ -e /dev/kvm ]; then
-        print_status "SUCCESS" "KVM acceleration available"
         KVM_AVAILABLE=true
+        print_status "SUCCESS" "✓ KVM acceleration"
     else
-        print_status "WARN" "KVM not available, VMs will run slower"
         KVM_AVAILABLE=false
+        print_status "WARN" "✗ KVM not available"
     fi
     
-    # Check CPU capabilities
+    # CPU
     CPU_CORES=$(nproc)
-    print_status "INFO" "CPU cores: $CPU_CORES"
-    
-    # Check for AVX2 support
+    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
     if grep -q avx2 /proc/cpuinfo; then
-        print_status "SUCCESS" "AVX2 support detected"
         CPU_FEATURES="-cpu host,+avx2"
+        print_status "SUCCESS" "✓ AVX2 support"
     else
         CPU_FEATURES="-cpu host"
     fi
+    print_status "INFO" "CPU: $CPU_CORES cores, RAM: ${TOTAL_MEM}MB"
     
-    # Check available memory
-    TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
-    print_status "INFO" "Total memory: ${TOTAL_MEM}MB"
-    
-    # Check virtio-gpu support
+    # virtio-gpu (ALWAYS TRY TO ENABLE)
     if qemu-system-x86_64 -device help 2>/dev/null | grep -q "virtio-vga-gl"; then
-        print_status "SUCCESS" "virtio-gpu with virgl available"
         VIRGL_AVAILABLE=true
+        print_status "SUCCESS" "✓ virtio-gpu + virgl (GPU ENABLED BY DEFAULT)"
     else
-        print_status "WARN" "virtio-gpu-gl not available"
         VIRGL_AVAILABLE=false
+        print_status "WARN" "✗ virtio-gpu not available (will use std VGA)"
+    fi
+    
+    # Xorg dummy check
+    if command -v Xorg &> /dev/null; then
+        print_status "SUCCESS" "✓ Xorg available"
+    else
+        print_status "WARN" "✗ Xorg not found (add xorg.xserver to dev.nix)"
     fi
 }
 
-# Function to check dependencies
 check_dependencies() {
     local deps=("qemu-system-x86_64" "wget" "cloud-localds" "qemu-img")
-    local missing_deps=()
-    
+    local missing=()
     for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &> /dev/null; then
-            missing_deps+=("$dep")
-        fi
+        command -v "$dep" &>/dev/null || missing+=("$dep")
     done
-    
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        print_status "ERROR" "Missing: ${missing_deps[*]}"
-        print_status "INFO" "Add to dev.nix packages"
+    if [ ${#missing[@]} -ne 0 ]; then
+        print_status "ERROR" "Missing: ${missing[*]}"
         exit 1
     fi
 }
 
-# Function to cleanup temporary files
 cleanup() {
     rm -f user-data meta-data 2>/dev/null
 }
 
-# Function to get all VM configurations
 get_vm_list() {
     find "$VM_DIR" -name "*.conf" -exec basename {} .conf \; 2>/dev/null | sort
 }
 
-# Function to load VM configuration
 load_vm_config() {
-    local vm_name=$1
-    local config_file="$VM_DIR/$vm_name.conf"
+    local config_file="$VM_DIR/$1.conf"
+    [[ -f "$config_file" ]] || { print_status "ERROR" "Config not found: $1"; return 1; }
     
-    if [[ -f "$config_file" ]]; then
-        unset VM_NAME OS_TYPE CODENAME IMG_URL HOSTNAME USERNAME PASSWORD
-        unset DISK_SIZE MEMORY CPUS SSH_PORT PORT_FORWARDS IMG_FILE SEED_FILE CREATED
-        unset ENABLE_VIRTIO_GPU DISK_CACHE NETWORK_MODEL IO_THREADS
-        
-        source "$config_file"
-        
-        ENABLE_VIRTIO_GPU="${ENABLE_VIRTIO_GPU:-false}"
-        DISK_CACHE="${DISK_CACHE:-writeback}"
-        NETWORK_MODEL="${NETWORK_MODEL:-virtio-net-pci}"
-        IO_THREADS="${IO_THREADS:-true}"
-        
-        return 0
-    else
-        print_status "ERROR" "Config not found: $vm_name"
-        return 1
-    fi
+    unset VM_NAME OS_TYPE CODENAME IMG_URL HOSTNAME USERNAME PASSWORD
+    unset DISK_SIZE MEMORY CPUS SSH_PORT PORT_FORWARDS IMG_FILE SEED_FILE CREATED
+    unset ENABLE_VIRTIO_GPU DISK_CACHE NETWORK_MODEL IO_THREADS
+    
+    source "$config_file"
+    
+    # DEFAULTS TO MAX PERFORMANCE
+    ENABLE_VIRTIO_GPU="${ENABLE_VIRTIO_GPU:-true}"
+    DISK_CACHE="${DISK_CACHE:-writeback}"
+    NETWORK_MODEL="${NETWORK_MODEL:-virtio-net-pci}"
+    IO_THREADS="${IO_THREADS:-true}"
 }
 
-# Function to save VM configuration
 save_vm_config() {
-    local config_file="$VM_DIR/$VM_NAME.conf"
-    
-    cat > "$config_file" <<EOF
+    cat > "$VM_DIR/$VM_NAME.conf" <<EOF
 VM_NAME="$VM_NAME"
 OS_TYPE="$OS_TYPE"
 CODENAME="$CODENAME"
@@ -192,34 +139,26 @@ DISK_CACHE="$DISK_CACHE"
 NETWORK_MODEL="$NETWORK_MODEL"
 IO_THREADS="$IO_THREADS"
 EOF
-    
     print_status "SUCCESS" "Configuration saved"
 }
 
-# Function to setup Xorg dummy
 setup_xorg_dummy() {
-    print_status "INFO" "Setting up Xorg dummy..."
+    print_status "INFO" "🎮 Setting up Xorg dummy..."
     
-    # Check if dummy driver exists
+    # Find dummy driver
     local dummy_driver=""
     for path in /nix/store/*/lib/xorg/modules/drivers/dummy_drv.so; do
-        if [ -f "$path" ]; then
-            dummy_driver="$path"
-            break
-        fi
+        [ -f "$path" ] && dummy_driver="$path" && break
     done
     
     if [ -z "$dummy_driver" ]; then
-        print_status "ERROR" "Dummy driver not found!"
-        print_status "INFO" "Add to dev.nix: xorg.xf86videodummy"
+        print_status "ERROR" "Dummy driver not found! Add: xorg.xf86videodummy to dev.nix"
         return 1
     fi
     
-    print_status "INFO" "Found driver: $dummy_driver"
-    
-    # Use relative path in current directory (not /tmp)
+    # Create Xorg config
     local xorg_conf="xorg-dummy-${VM_NAME}.conf"
-    cat > "$xorg_conf" << 'EOF'
+    cat > "$xorg_conf" <<'EOF'
 Section "ServerLayout"
     Identifier "dummy_layout"
     Screen 0 "dummy_screen"
@@ -251,61 +190,42 @@ EOF
     
     # Find free display
     local display_num=10
-    while [ -f "/tmp/.X${display_num}-lock" ]; do
-        ((display_num++))
-    done
+    while [ -f "/tmp/.X${display_num}-lock" ]; do ((display_num++)); done
     
     print_status "INFO" "Starting Xorg :$display_num..."
-    
-    # Use relative path for config
     Xorg :$display_num -config "$xorg_conf" -logfile "xorg-${VM_NAME}.log" &
     local xorg_pid=$!
     
-    print_status "INFO" "Waiting for Xorg (PID: $xorg_pid)..."
     sleep 3
     
-    if ps -p $xorg_pid > /dev/null 2>&1; then
-        print_status "SUCCESS" "Xorg started on :$display_num"
+    if ps -p $xorg_pid >/dev/null 2>&1; then
+        print_status "SUCCESS" "✓ Xorg started on :$display_num (PID: $xorg_pid)"
         echo "$xorg_pid" > "xorg-${VM_NAME}.pid"
         echo ":$display_num"
         return 0
     else
-        print_status "ERROR" "Xorg failed to start!"
-        echo ""
-        print_status "ERROR" "=== Xorg Log ==="
-        if [ -f "xorg-${VM_NAME}.log" ]; then
-            tail -30 "xorg-${VM_NAME}.log"
-        else
-            echo "No log file found"
-        fi
-        print_status "ERROR" "================"
+        print_status "ERROR" "Xorg failed!"
+        [ -f "xorg-${VM_NAME}.log" ] && tail -20 "xorg-${VM_NAME}.log"
         return 1
     fi
 }
 
-# Function to stop Xorg dummy
 stop_xorg_dummy() {
-    local xorg_pid_file="xorg-${VM_NAME}.pid"
-    if [ -f "$xorg_pid_file" ]; then
-        local xorg_pid=$(cat "$xorg_pid_file")
-        if ps -p $xorg_pid > /dev/null 2>&1; then
-            print_status "INFO" "Stopping Xorg (PID: $xorg_pid)"
-            kill $xorg_pid 2>/dev/null
-            rm -f "$xorg_pid_file"
-        fi
+    local pid_file="xorg-${VM_NAME}.pid"
+    if [ -f "$pid_file" ]; then
+        local xorg_pid=$(cat "$pid_file")
+        ps -p $xorg_pid >/dev/null 2>&1 && kill $xorg_pid 2>/dev/null
+        rm -f "$pid_file"
     fi
-    rm -f "xorg-dummy-${VM_NAME}.conf"
-    rm -f "xorg-${VM_NAME}.log"
+    rm -f "xorg-dummy-${VM_NAME}.conf" "xorg-${VM_NAME}.log"
 }
 
-# Function to create new VM
 create_new_vm() {
-    print_status "INFO" "Creating new VM"
+    print_status "INFO" "🆕 Creating new VM"
     
     # OS Selection
     print_status "INFO" "Select OS:"
-    local os_options=()
-    local i=1
+    local os_options=() i=1
     for os in "${!OS_OPTIONS[@]}"; do
         echo "  $i) $os"
         os_options[$i]="$os"
@@ -321,144 +241,54 @@ create_new_vm() {
         fi
     done
 
-    # VM name
+    # Basic config
     while true; do
         read -p "$(print_status "INPUT" "VM name (default: $DEFAULT_HOSTNAME): ")" VM_NAME
         VM_NAME="${VM_NAME:-$DEFAULT_HOSTNAME}"
-        if validate_input "name" "$VM_NAME"; then
-            if [[ -f "$VM_DIR/$VM_NAME.conf" ]]; then
-                print_status "ERROR" "VM exists: $VM_NAME"
-            else
-                break
-            fi
-        fi
+        validate_input "name" "$VM_NAME" && [[ ! -f "$VM_DIR/$VM_NAME.conf" ]] && break
+        print_status "ERROR" "VM exists: $VM_NAME"
     done
 
-    # Hostname
-    while true; do
-        read -p "$(print_status "INPUT" "Hostname (default: $VM_NAME): ")" HOSTNAME
-        HOSTNAME="${HOSTNAME:-$VM_NAME}"
-        validate_input "name" "$HOSTNAME" && break
-    done
-
-    # Username
-    while true; do
-        read -p "$(print_status "INPUT" "Username (default: $DEFAULT_USERNAME): ")" USERNAME
-        USERNAME="${USERNAME:-$DEFAULT_USERNAME}"
-        validate_input "username" "$USERNAME" && break
-    done
-
-    # Password
-    while true; do
-        read -s -p "$(print_status "INPUT" "Password (default: $DEFAULT_PASSWORD): ")" PASSWORD
-        PASSWORD="${PASSWORD:-$DEFAULT_PASSWORD}"
-        echo
-        [ -n "$PASSWORD" ] && break
-    done
-
-    # Disk size
-    while true; do
-        read -p "$(print_status "INPUT" "Disk size (default: 20G): ")" DISK_SIZE
-        DISK_SIZE="${DISK_SIZE:-20G}"
-        validate_input "size" "$DISK_SIZE" && break
-    done
-
-    # Memory
-    while true; do
-        read -p "$(print_status "INPUT" "Memory MB (default: 2048): ")" MEMORY
-        MEMORY="${MEMORY:-2048}"
-        if validate_input "number" "$MEMORY"; then
-            if [ "$MEMORY" -gt "$TOTAL_MEM" ]; then
-                print_status "WARN" "Exceeds available: $TOTAL_MEM MB"
-                read -p "Continue? (y/N): " confirm
-                [[ "$confirm" =~ ^[Yy]$ ]] && break
-            else
-                break
-            fi
-        fi
-    done
-
-    # CPUs
-    while true; do
-        read -p "$(print_status "INPUT" "CPUs (default: 2, max: $CPU_CORES): ")" CPUS
-        CPUS="${CPUS:-2}"
-        if validate_input "number" "$CPUS"; then
-            if [ "$CPUS" -gt "$CPU_CORES" ]; then
-                print_status "WARN" "Exceeds available: $CPU_CORES"
-                read -p "Continue? (y/N): " confirm
-                [[ "$confirm" =~ ^[Yy]$ ]] && break
-            else
-                break
-            fi
-        fi
-    done
-
-    # SSH Port
-    while true; do
-        read -p "$(print_status "INPUT" "SSH Port (default: 2222): ")" SSH_PORT
-        SSH_PORT="${SSH_PORT:-2222}"
-        if validate_input "port" "$SSH_PORT"; then
-            if ss -tln 2>/dev/null | grep -q ":$SSH_PORT "; then
-                print_status "ERROR" "Port in use: $SSH_PORT"
-            else
-                break
-            fi
-        fi
-    done
-
-    # GPU acceleration
-    if [ "$VIRGL_AVAILABLE" = true ]; then
-        while true; do
-            read -p "$(print_status "INPUT" "Enable GPU (virtio-gpu)? (y/n): ")" gpu_input
-            gpu_input="${gpu_input:-n}"
-            if [[ "$gpu_input" =~ ^[Yy]$ ]]; then
-                ENABLE_VIRTIO_GPU=true
-                print_status "SUCCESS" "GPU enabled (virgl 3D)"
-                print_status "INFO" "Xorg dummy will auto-install in VM"
-                break
-            elif [[ "$gpu_input" =~ ^[Nn]$ ]]; then
-                ENABLE_VIRTIO_GPU=false
-                break
-            fi
-        done
-    else
-        ENABLE_VIRTIO_GPU=false
-        print_status "INFO" "virtio-gpu not available"
-    fi
-
-    # Performance options
-    echo ""
-    print_status "INFO" "⚡ Performance Options"
+    read -p "$(print_status "INPUT" "Hostname (default: $VM_NAME): ")" HOSTNAME
+    HOSTNAME="${HOSTNAME:-$VM_NAME}"
     
-    echo "Disk cache:"
-    echo "  1) writeback (fastest)"
-    echo "  2) writethrough (balanced)"
-    echo "  3) none (safest)"
-    while true; do
-        read -p "Choice (1-3, default: 1): " cache_choice
-        cache_choice="${cache_choice:-1}"
-        case $cache_choice in
-            1) DISK_CACHE="writeback"; break ;;
-            2) DISK_CACHE="writethrough"; break ;;
-            3) DISK_CACHE="none"; break ;;
-        esac
-    done
+    read -p "$(print_status "INPUT" "Username (default: $DEFAULT_USERNAME): ")" USERNAME
+    USERNAME="${USERNAME:-$DEFAULT_USERNAME}"
     
-    while true; do
-        read -p "Enable I/O threads? (y/n, default: y): " io_input
-        io_input="${io_input:-y}"
-        if [[ "$io_input" =~ ^[Yy]$ ]]; then
-            IO_THREADS=true
-            break
-        elif [[ "$io_input" =~ ^[Nn]$ ]]; then
-            IO_THREADS=false
-            break
-        fi
-    done
+    read -s -p "$(print_status "INPUT" "Password (default: $DEFAULT_PASSWORD): ")" PASSWORD
+    PASSWORD="${PASSWORD:-$DEFAULT_PASSWORD}"
+    echo
+
+    # Performance config - DEFAULTS TO MAX
+    read -p "$(print_status "INPUT" "Disk size (default: 30G): ")" DISK_SIZE
+    DISK_SIZE="${DISK_SIZE:-30G}"
     
-    NETWORK_MODEL="virtio-net-pci"
+    read -p "$(print_status "INPUT" "Memory MB (default: 4096): ")" MEMORY
+    MEMORY="${MEMORY:-4096}"
+    
+    read -p "$(print_status "INPUT" "CPUs (default: 4, max: $CPU_CORES): ")" CPUS
+    CPUS="${CPUS:-4}"
+    [ "$CPUS" -gt "$CPU_CORES" ] && CPUS=$CPU_CORES
+    
+    read -p "$(print_status "INPUT" "SSH Port (default: 2222): ")" SSH_PORT
+    SSH_PORT="${SSH_PORT:-2222}"
     
     read -p "$(print_status "INPUT" "Port forwards (e.g., 8080:80): ")" PORT_FORWARDS
+
+    # GPU - DEFAULT TO TRUE if available
+    if [ "$VIRGL_AVAILABLE" = true ]; then
+        ENABLE_VIRTIO_GPU=true
+        print_status "SUCCESS" "🎮 GPU acceleration ENABLED (virtio-gpu + virgl)"
+        print_status "INFO" "Xorg dummy will auto-install in VM"
+    else
+        ENABLE_VIRTIO_GPU=false
+        print_status "WARN" "GPU not available, using standard VGA"
+    fi
+    
+    # Performance defaults - ALL MAX
+    DISK_CACHE="writeback"  # Fastest
+    IO_THREADS=true         # Best I/O performance
+    NETWORK_MODEL="virtio-net-pci"  # Fastest network
 
     IMG_FILE="$VM_DIR/$VM_NAME.img"
     SEED_FILE="$VM_DIR/$VM_NAME-seed.iso"
@@ -468,23 +298,21 @@ create_new_vm() {
     save_vm_config
     
     echo ""
-    print_status "SUCCESS" "⚡ VM Created"
-    echo "  • CPU: $CPUS cores"
-    echo "  • Memory: ${MEMORY}MB"
-    echo "  • Disk: $DISK_SIZE ($DISK_CACHE)"
-    echo "  • I/O threads: $IO_THREADS"
-    [ "$ENABLE_VIRTIO_GPU" = true ] && echo "  • GPU: virtio-gpu (virgl)"
+    print_status "SUCCESS" "⚡ VM Created with MAX PERFORMANCE"
+    echo "  ✓ CPU: $CPUS cores"
+    echo "  ✓ Memory: ${MEMORY}MB"
+    echo "  ✓ Disk: $DISK_SIZE (cache=$DISK_CACHE)"
+    echo "  ✓ I/O threads: ENABLED"
+    echo "  ✓ Network: virtio-net-pci"
+    [ "$ENABLE_VIRTIO_GPU" = true ] && echo "  ✓ GPU: virtio-gpu + virgl + Xorg dummy"
 }
 
-# Function to setup VM image
 setup_vm_image() {
-    print_status "INFO" "Preparing image..."
+    print_status "INFO" "📦 Preparing image..."
     
     mkdir -p "$VM_DIR"
     
-    if [[ -f "$IMG_FILE" ]]; then
-        print_status "INFO" "Image exists, skipping download"
-    else
+    if [[ ! -f "$IMG_FILE" ]]; then
         print_status "INFO" "Downloading from $IMG_URL..."
         wget --progress=bar:force "$IMG_URL" -O "$IMG_FILE.tmp" || {
             print_status "ERROR" "Download failed"
@@ -493,12 +321,9 @@ setup_vm_image() {
         mv "$IMG_FILE.tmp" "$IMG_FILE"
     fi
     
-    qemu-img resize "$IMG_FILE" "$DISK_SIZE" 2>/dev/null || {
-        rm -f "$IMG_FILE"
-        qemu-img create -f qcow2 "$IMG_FILE" "$DISK_SIZE"
-    }
+    qemu-img resize "$IMG_FILE" "$DISK_SIZE" 2>/dev/null || qemu-img create -f qcow2 "$IMG_FILE" "$DISK_SIZE"
 
-    # Base cloud-init config
+    # Cloud-init
     cat > user-data <<EOF
 #cloud-config
 hostname: $HOSTNAME
@@ -516,7 +341,7 @@ chpasswd:
   expire: false
 EOF
 
-    # Add Xorg dummy setup if GPU enabled
+    # Add Xorg dummy if GPU enabled
     if [ "$ENABLE_VIRTIO_GPU" = true ]; then
         cat >> user-data <<'XORG_EOF'
 packages:
@@ -524,6 +349,7 @@ packages:
   - xserver-xorg-video-dummy
   - x11-xserver-utils
   - mesa-utils
+  - glmark2
 
 write_files:
   - path: /etc/X11/xorg.conf.d/20-dummy.conf
@@ -554,7 +380,7 @@ write_files:
   - path: /etc/systemd/system/xorg-dummy.service
     content: |
       [Unit]
-      Description=Xorg Dummy Display
+      Description=Xorg Dummy Display for GPU Acceleration
       After=network.target
       
       [Service]
@@ -571,6 +397,7 @@ runcmd:
   - systemctl enable xorg-dummy
   - systemctl start xorg-dummy
   - echo "export DISPLAY=:0" >> /etc/environment
+  - echo "🎮 GPU acceleration enabled with Xorg dummy" > /etc/motd
 XORG_EOF
     fi
 
@@ -584,11 +411,9 @@ EOF
         exit 1
     }
     
-    print_status "SUCCESS" "VM image ready"
-    [ "$ENABLE_VIRTIO_GPU" = true ] && print_status "INFO" "Xorg dummy will auto-start in VM"
+    print_status "SUCCESS" "✓ VM image ready"
 }
 
-# Function to build QEMU command
 build_qemu_command() {
     local qemu_cmd=(qemu-system-x86_64)
     
@@ -604,7 +429,7 @@ build_qemu_command() {
     [ "$KVM_AVAILABLE" = true ] && machine_opts+=",accel=kvm"
     qemu_cmd+=(-machine "$machine_opts")
     
-    # Disk
+    # Disk with I/O threads (MAX PERFORMANCE)
     if [ "$IO_THREADS" = true ]; then
         local aio_mode="threads"
         [ "$DISK_CACHE" = "none" ] && aio_mode="native"
@@ -618,11 +443,8 @@ build_qemu_command() {
             -device "scsi-cd,drive=drive1,bus=scsi0.0"
         )
     else
-        local aio_mode="threads"
-        [ "$DISK_CACHE" = "none" ] && aio_mode="native"
-        
         qemu_cmd+=(
-            -drive "file=$IMG_FILE,format=qcow2,if=virtio,cache=$DISK_CACHE,aio=$aio_mode"
+            -drive "file=$IMG_FILE,format=qcow2,if=virtio,cache=$DISK_CACHE,aio=threads"
             -drive "file=$SEED_FILE,format=raw,if=virtio,cache=none"
         )
     fi
@@ -643,24 +465,20 @@ build_qemu_command() {
         done
     fi
     
-    # Display configuration - GPU ALWAYS ENABLED if config says so
+    # Display - GPU if enabled
     if [ "$ENABLE_VIRTIO_GPU" = "true" ]; then
-        # virtio-vga-gl for GPU acceleration
         qemu_cmd+=(
             -device "virtio-vga-gl"
             -display "egl-headless"
         )
     else
-        # Standard VGA without GPU acceleration
-        qemu_cmd+=(
-            -vga std
-        )
+        qemu_cmd+=(-vga std)
     fi
     
-    # Serial console for SSH access (headless)
+    # Serial console (headless)
     qemu_cmd+=(-nographic -serial mon:stdio)
     
-    # Performance
+    # Performance optimizations
     qemu_cmd+=(
         -object "rng-random,filename=/dev/urandom,id=rng0"
         -device "virtio-rng-pci,rng=rng0"
@@ -673,287 +491,120 @@ build_qemu_command() {
     echo "${qemu_cmd[@]}"
 }
 
-# Function to start VM
 start_vm() {
     local vm_name=$1
+    load_vm_config "$vm_name" || return 1
     
-    if load_vm_config "$vm_name"; then
-        print_status "INFO" "Starting VM: $vm_name"
-        print_status "INFO" "SSH: ssh -p $SSH_PORT $USERNAME@localhost"
-        print_status "INFO" "Password: $PASSWORD"
-        
-        [[ ! -f "$IMG_FILE" ]] && { print_status "ERROR" "Image not found"; return 1; }
-        [[ ! -f "$SEED_FILE" ]] && { print_status "WARN" "Recreating seed..."; setup_vm_image; }
-        
-        # Setup Xorg if GPU enabled
-        local xorg_display=""
-        if [ "$ENABLE_VIRTIO_GPU" = true ] && [ "$VIRGL_AVAILABLE" = true ]; then
-            if ! command -v Xorg &> /dev/null; then
-                print_status "WARN" "Xorg not found, GPU disabled"
-                ENABLE_VIRTIO_GPU=false
-            elif [ -z "${DISPLAY:-}" ]; then
-                print_status "INFO" "🎮 Setting up Xorg dummy..."
-                xorg_display=$(setup_xorg_dummy)
-                if [ $? -eq 0 ]; then
-                    export DISPLAY="$xorg_display"
-                    print_status "SUCCESS" "Xorg ready: $DISPLAY"
-                else
-                    print_status "WARN" "Xorg failed, GPU disabled"
-                    ENABLE_VIRTIO_GPU=false
-                fi
+    print_status "INFO" "🚀 Starting VM: $vm_name"
+    print_status "INFO" "SSH: ssh -p $SSH_PORT $USERNAME@localhost"
+    print_status "INFO" "Password: $PASSWORD"
+    
+    [[ ! -f "$IMG_FILE" ]] && { print_status "ERROR" "Image not found"; return 1; }
+    [[ ! -f "$SEED_FILE" ]] && setup_vm_image
+    
+    # Setup Xorg if GPU enabled
+    local xorg_display=""
+    if [ "$ENABLE_VIRTIO_GPU" = true ] && [ "$VIRGL_AVAILABLE" = true ]; then
+        if ! command -v Xorg &>/dev/null; then
+            print_status "WARN" "Xorg not found, GPU disabled"
+            ENABLE_VIRTIO_GPU=false
+        elif [ -z "${DISPLAY:-}" ]; then
+            print_status "INFO" "🎮 Setting up Xorg dummy..."
+            xorg_display=$(setup_xorg_dummy)
+            if [ $? -eq 0 ]; then
+                export DISPLAY="$xorg_display"
+                print_status "SUCCESS" "✓ Xorg ready: $DISPLAY"
             else
-                print_status "INFO" "Using DISPLAY: $DISPLAY"
+                print_status "WARN" "Xorg failed, GPU disabled"
+                ENABLE_VIRTIO_GPU=false
             fi
-        fi
-        
-        local qemu_cmd=($(build_qemu_command))
-        
-        print_status "INFO" "⚡ Performance:"
-        [ "$KVM_AVAILABLE" = true ] && echo "  ✓ KVM"
-        echo "  ✓ CPU: $CPUS cores"
-        echo "  ✓ Disk: $DISK_CACHE"
-        [ "$IO_THREADS" = true ] && echo "  ✓ I/O threads"
-        echo "  ✓ Network: $NETWORK_MODEL"
-        if [ "$ENABLE_VIRTIO_GPU" = true ]; then
-            echo "  ✓ GPU: virtio-gpu (virgl)"
-            [ -n "$xorg_display" ] && echo "  ✓ Xorg: $xorg_display"
-        fi
-        
-        print_status "INFO" "Starting QEMU..."
-        
-        [ -n "$xorg_display" ] && trap "stop_xorg_dummy" EXIT INT TERM
-        
-        "${qemu_cmd[@]}"
-        
-        [ -n "$xorg_display" ] && stop_xorg_dummy
-        
-        print_status "INFO" "VM stopped"
-    fi
-}
-
-# Function to stop VM
-stop_vm() {
-    local vm_name=$1
-    
-    if load_vm_config "$vm_name"; then
-        if is_vm_running "$vm_name"; then
-            print_status "INFO" "Stopping VM: $vm_name"
-            pkill -f "qemu-system-x86_64.*$IMG_FILE"
-            sleep 2
-            is_vm_running "$vm_name" && pkill -9 -f "qemu-system-x86_64.*$IMG_FILE"
-            print_status "SUCCESS" "VM stopped"
         else
-            print_status "INFO" "VM not running"
+            print_status "INFO" "Using DISPLAY: $DISPLAY"
         fi
+    fi
+    
+    local qemu_cmd=($(build_qemu_command))
+    
+    print_status "INFO" "⚡ Performance Profile:"
+    [ "$KVM_AVAILABLE" = true ] && echo "  ✓ KVM acceleration"
+    echo "  ✓ CPU: $CPUS cores ($CPU_FEATURES)"
+    echo "  ✓ Memory: ${MEMORY}MB"
+    echo "  ✓ Disk: cache=$DISK_CACHE"
+    [ "$IO_THREADS" = true ] && echo "  ✓ I/O threads: enabled"
+    echo "  ✓ Network: $NETWORK_MODEL"
+    if [ "$ENABLE_VIRTIO_GPU" = true ]; then
+        echo "  ✓ GPU: virtio-gpu + virgl"
+        [ -n "$xorg_display" ] && echo "  ✓ Xorg: $xorg_display"
+    fi
+    
+    print_status "INFO" "Starting QEMU..."
+    
+    [ -n "$xorg_display" ] && trap "stop_xorg_dummy" EXIT INT TERM
+    
+    "${qemu_cmd[@]}"
+    
+    [ -n "$xorg_display" ] && stop_xorg_dummy
+    
+    print_status "INFO" "VM stopped"
+}
+
+stop_vm() {
+    load_vm_config "$1" || return 1
+    if pgrep -f "qemu-system-x86_64.*$IMG_FILE" >/dev/null; then
+        print_status "INFO" "Stopping VM: $1"
+        pkill -f "qemu-system-x86_64.*$IMG_FILE"
+        sleep 2
+        pkill -9 -f "qemu-system-x86_64.*$IMG_FILE" 2>/dev/null
+        print_status "SUCCESS" "VM stopped"
+    else
+        print_status "INFO" "VM not running"
     fi
 }
 
-# Function to delete VM
 delete_vm() {
-    local vm_name=$1
-    
-    print_status "WARN" "Delete VM '$vm_name'?"
+    print_status "WARN" "Delete VM '$1'?"
     read -p "Confirm (y/N): " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        if load_vm_config "$vm_name"; then
-            rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.conf"
+        load_vm_config "$1" && {
+            rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$1.conf"
             print_status "SUCCESS" "VM deleted"
-        fi
+        }
     fi
 }
 
-# Function to show VM info
 show_vm_info() {
-    local vm_name=$1
+    load_vm_config "$1" || return 1
     
-    if load_vm_config "$vm_name"; then
-        echo ""
-        print_status "INFO" "VM: $vm_name"
-        echo "========================================"
-        echo "OS: $OS_TYPE"
-        echo "Hostname: $HOSTNAME"
-        echo "User: $USERNAME"
-        echo "Password: $PASSWORD"
-        echo "SSH Port: $SSH_PORT"
-        echo "Memory: $MEMORY MB"
-        echo "CPUs: $CPUS"
-        echo "Disk: $DISK_SIZE"
-        echo "Forwards: ${PORT_FORWARDS:-None}"
-        echo ""
-        echo "Performance:"
-        echo "  Cache: $DISK_CACHE"
-        echo "  I/O: $IO_THREADS"
-        echo "  GPU: $ENABLE_VIRTIO_GPU"
-        echo ""
-        echo "Created: $CREATED"
-        echo "========================================"
-        read -p "Press Enter..."
-    fi
+    echo ""
+    print_status "INFO" "VM: $1"
+    echo "========================================"
+    echo "OS: $OS_TYPE $CODENAME"
+    echo "Hostname: $HOSTNAME"
+    echo "User: $USERNAME / Password: $PASSWORD"
+    echo "SSH: ssh -p $SSH_PORT $USERNAME@localhost"
+    echo ""
+    echo "Resources:"
+    echo "  Memory: $MEMORY MB"
+    echo "  CPUs: $CPUS"
+    echo "  Disk: $DISK_SIZE"
+    echo "  Port forwards: ${PORT_FORWARDS:-None}"
+    echo ""
+    echo "Performance:"
+    echo "  Cache: $DISK_CACHE"
+    echo "  I/O threads: $IO_THREADS"
+    echo "  GPU: $ENABLE_VIRTIO_GPU"
+    echo "  Network: $NETWORK_MODEL"
+    echo ""
+    echo "Created: $CREATED"
+    echo "========================================"
+    read -p "Press Enter..."
 }
 
-# Function to check if VM running
 is_vm_running() {
-    local vm_name=$1
-    pgrep -f "qemu-system-x86_64.*$vm_name" >/dev/null
+    pgrep -f "qemu-system-x86_64.*$1" >/dev/null
 }
 
-# Function to edit VM
-edit_vm_config() {
-    local vm_name=$1
-    
-    if load_vm_config "$vm_name"; then
-        while true; do
-            echo "Edit:"
-            echo "  1) Hostname"
-            echo "  2) Username"
-            echo "  3) Password"
-            echo "  4) SSH Port"
-            echo "  5) Port Forwards"
-            echo "  6) Memory"
-            echo "  7) CPUs"
-            echo "  8) Disk Size"
-            echo "  9) Performance"
-            echo "  0) Back"
-            
-            read -p "Choice: " edit_choice
-            
-            case $edit_choice in
-                1)
-                    read -p "Hostname (current: $HOSTNAME): " new_hostname
-                    new_hostname="${new_hostname:-$HOSTNAME}"
-                    validate_input "name" "$new_hostname" && HOSTNAME="$new_hostname"
-                    ;;
-                2)
-                    read -p "Username (current: $USERNAME): " new_username
-                    new_username="${new_username:-$USERNAME}"
-                    validate_input "username" "$new_username" && USERNAME="$new_username"
-                    ;;
-                3)
-                    read -s -p "Password: " new_password
-                    echo
-                    [ -n "$new_password" ] && PASSWORD="$new_password"
-                    ;;
-                4)
-                    read -p "SSH Port (current: $SSH_PORT): " new_port
-                    new_port="${new_port:-$SSH_PORT}"
-                    validate_input "port" "$new_port" && SSH_PORT="$new_port"
-                    ;;
-                5)
-                    read -p "Forwards (current: ${PORT_FORWARDS:-None}): " new_forwards
-                    PORT_FORWARDS="${new_forwards:-$PORT_FORWARDS}"
-                    ;;
-                6)
-                    read -p "Memory (current: $MEMORY): " new_mem
-                    new_mem="${new_mem:-$MEMORY}"
-                    validate_input "number" "$new_mem" && MEMORY="$new_mem"
-                    ;;
-                7)
-                    read -p "CPUs (current: $CPUS): " new_cpus
-                    new_cpus="${new_cpus:-$CPUS}"
-                    validate_input "number" "$new_cpus" && CPUS="$new_cpus"
-                    ;;
-                8)
-                    read -p "Disk size (current: $DISK_SIZE): " new_disk
-                    new_disk="${new_disk:-$DISK_SIZE}"
-                    validate_input "size" "$new_disk" && DISK_SIZE="$new_disk"
-                    ;;
-                9)
-                    echo "Performance:"
-                    echo "  1) Cache: $DISK_CACHE"
-                    echo "  2) I/O: $IO_THREADS"
-                    echo "  3) GPU: $ENABLE_VIRTIO_GPU"
-                    read -p "Choice: " perf_choice
-                    case $perf_choice in
-                        1)
-                            echo "  1) writeback  2) writethrough  3) none"
-                            read -p "Choice: " cache_choice
-                            case $cache_choice in
-                                1) DISK_CACHE="writeback" ;;
-                                2) DISK_CACHE="writethrough" ;;
-                                3) DISK_CACHE="none" ;;
-                            esac
-                            ;;
-                        2)
-                            read -p "I/O threads (y/n): " io_choice
-                            [[ "$io_choice" =~ ^[Yy]$ ]] && IO_THREADS=true || IO_THREADS=false
-                            ;;
-                        3)
-                            if [ "$VIRGL_AVAILABLE" = true ]; then
-                                read -p "GPU (y/n): " gpu_choice
-                                [[ "$gpu_choice" =~ ^[Yy]$ ]] && ENABLE_VIRTIO_GPU=true || ENABLE_VIRTIO_GPU=false
-                            else
-                                print_status "INFO" "virtio-gpu not available"
-                            fi
-                            ;;
-                    esac
-                    ;;
-                0) return 0 ;;
-                *) continue ;;
-            esac
-            
-            [[ "$edit_choice" =~ ^[123]$ ]] && setup_vm_image
-            save_vm_config
-            
-            read -p "Continue? (y/N): " cont
-            [[ ! "$cont" =~ ^[Yy]$ ]] && break
-        done
-    fi
-}
-
-# Function to resize disk
-resize_vm_disk() {
-    local vm_name=$1
-    
-    if load_vm_config "$vm_name"; then
-        print_status "INFO" "Current: $DISK_SIZE"
-        read -p "New size: " new_size
-        
-        if validate_input "size" "$new_size"; then
-            if qemu-img resize "$IMG_FILE" "$new_size"; then
-                DISK_SIZE="$new_size"
-                save_vm_config
-                print_status "SUCCESS" "Resized to $new_size"
-            else
-                print_status "ERROR" "Resize failed"
-            fi
-        fi
-    fi
-}
-
-# Function to show performance
-show_vm_performance() {
-    local vm_name=$1
-    
-    if load_vm_config "$vm_name"; then
-        if is_vm_running "$vm_name"; then
-            print_status "INFO" "Performance: $vm_name"
-            echo "========================================"
-            
-            local qemu_pid=$(pgrep -f "qemu-system-x86_64.*$IMG_FILE")
-            if [[ -n "$qemu_pid" ]]; then
-                echo "Process:"
-                ps -p "$qemu_pid" -o pid,%cpu,%mem,vsz,rss --no-headers
-                echo ""
-                echo "Memory:"
-                free -h
-                echo ""
-                echo "Disk:"
-                du -h "$IMG_FILE"
-            fi
-        else
-            print_status "INFO" "VM not running"
-            echo "Config:"
-            echo "  Memory: $MEMORY MB"
-            echo "  CPUs: $CPUS"
-            echo "  Disk: $DISK_SIZE"
-        fi
-        echo "========================================"
-        read -p "Press Enter..."
-    fi
-}
-
-# Main menu
 main_menu() {
     while true; do
         display_header
@@ -964,25 +615,22 @@ main_menu() {
         if [ $vm_count -gt 0 ]; then
             print_status "INFO" "$vm_count VM(s):"
             for i in "${!vms[@]}"; do
-                local status="Stopped"
-                is_vm_running "${vms[$i]}" && status="Running"
-                printf "  %2d) %s (%s)\n" $((i+1)) "${vms[$i]}" "$status"
+                local status="⭕ Stopped"
+                is_vm_running "${vms[$i]}" && status="✅ Running"
+                printf "  %2d) %-20s %s\n" $((i+1)) "${vms[$i]}" "$status"
             done
             echo
         fi
         
         echo "Menu:"
-        echo "  1) Create VM"
-        [ $vm_count -gt 0 ] && cat << EOF
-  2) Start VM
-  3) Stop VM
-  4) VM Info
-  5) Edit VM
-  6) Delete VM
-  7) Resize Disk
-  8) Performance
+        echo "  1) 🆕 Create VM (GPU DEFAULT)"
+        [ $vm_count -gt 0 ] && cat <<EOF
+  2) 🚀 Start VM
+  3) ⏹️  Stop VM
+  4) ℹ️  VM Info
+  5) 🗑️  Delete VM
 EOF
-        echo "  0) Exit"
+        echo "  0) 🚪 Exit"
         echo
         
         read -p "Choice: " choice
@@ -1014,50 +662,26 @@ EOF
                 if [ $vm_count -gt 0 ]; then
                     read -p "VM number: " vm_num
                     [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ] && \
-                    edit_vm_config "${vms[$((vm_num-1))]}"
-                fi
-                ;;
-            6)
-                if [ $vm_count -gt 0 ]; then
-                    read -p "VM number: " vm_num
-                    [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ] && \
                     delete_vm "${vms[$((vm_num-1))]}"
                 fi
                 ;;
-            7)
-                if [ $vm_count -gt 0 ]; then
-                    read -p "VM number: " vm_num
-                    [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ] && \
-                    resize_vm_disk "${vms[$((vm_num-1))]}"
-                fi
-                ;;
-            8)
-                if [ $vm_count -gt 0 ]; then
-                    read -p "VM number: " vm_num
-                    [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ] && \
-                    show_vm_performance "${vms[$((vm_num-1))]}"
-                fi
-                ;;
             0)
-                print_status "INFO" "Goodbye!"
+                print_status "INFO" "👋 Goodbye!"
                 exit 0
                 ;;
         esac
         
-        read -p "Press Enter..."
+        read -p "Press Enter to continue..."
     done
 }
 
 # Trap cleanup
 trap cleanup EXIT
 
-# Check dependencies
+# Initialize
 check_dependencies
-
-# Check capabilities
 check_system_capabilities
 
-# Initialize
 VM_DIR="${VM_DIR:-$HOME/vms}"
 mkdir -p "$VM_DIR"
 
