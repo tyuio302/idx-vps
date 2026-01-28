@@ -6,7 +6,6 @@
     unzip
     openssh
     git
-    sudo
     wget
     curl
     
