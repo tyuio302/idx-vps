@@ -2,16 +2,17 @@
 set -euo pipefail
 
 # =============================
-# MAX PERFORMANCE VM Manager for IDX Google
-# virtio-gpu + Xorg dummy ENABLED BY DEFAULT
-# Pure Nix packages - NO APT/DPKG
+# MAX PERFORMANCE VM Manager
+# virtio-vga-gl MANDATORY for all VMs
+# Xorg dummy in VM ONLY (not on host)
+# Host needs: QEMU + cloud-init only
 # =============================
 
 display_header() {
     clear
     cat << "EOF"
 ========================================================================
-🚀 MAX PERFORMANCE - virtio-gpu + Xorg dummy DEFAULT
+MAX PERFORMANCE VM Manager - virtio-vga-gl DEFAULT
 Sponsor By: HOPINGBOYZ, Jishnu, NotGamerPie
 ========================================================================
 EOF
@@ -41,15 +42,15 @@ validate_input() {
 }
 
 check_system_capabilities() {
-    print_status "INFO" "⚡ Checking capabilities..."
+    print_status "INFO" "Checking system capabilities..."
     
     # KVM
     if [ -e /dev/kvm ]; then
         KVM_AVAILABLE=true
-        print_status "SUCCESS" "✓ KVM acceleration"
+        print_status "SUCCESS" "KVM acceleration available"
     else
         KVM_AVAILABLE=false
-        print_status "WARN" "✗ KVM not available"
+        print_status "WARN" "KVM not available (slower performance)"
     fi
     
     # CPU
@@ -57,27 +58,23 @@ check_system_capabilities() {
     TOTAL_MEM=$(free -m | awk '/^Mem:/{print $2}')
     if grep -q avx2 /proc/cpuinfo; then
         CPU_FEATURES="-cpu host,+avx2"
-        print_status "SUCCESS" "✓ AVX2 support"
+        print_status "SUCCESS" "AVX2 support detected"
     else
         CPU_FEATURES="-cpu host"
     fi
     print_status "INFO" "CPU: $CPU_CORES cores, RAM: ${TOTAL_MEM}MB"
     
-    # virtio-gpu (ALWAYS TRY TO ENABLE)
+    # virtio-vga-gl check
     if qemu-system-x86_64 -device help 2>/dev/null | grep -q "virtio-vga-gl"; then
-        VIRGL_AVAILABLE=true
-        print_status "SUCCESS" "✓ virtio-gpu + virgl (GPU ENABLED BY DEFAULT)"
+        print_status "SUCCESS" "virtio-vga-gl available - will be used for ALL VMs"
     else
-        VIRGL_AVAILABLE=false
-        print_status "WARN" "✗ virtio-gpu not available (will use std VGA)"
+        print_status "ERROR" "virtio-vga-gl NOT available!"
+        print_status "ERROR" "This script requires QEMU with virglrenderer support"
+        print_status "INFO" "Make sure dev.nix has: pkgs.qemu (with virgl enabled)"
+        exit 1
     fi
     
-    # Xorg dummy check
-    if command -v Xorg &> /dev/null; then
-        print_status "SUCCESS" "✓ Xorg available"
-    else
-        print_status "WARN" "✗ Xorg not found (add xorg.xserver to dev.nix)"
-    fi
+    print_status "INFO" "Note: Xorg dummy will be auto-installed in VMs (not on host)"
 }
 
 check_dependencies() {
@@ -87,7 +84,8 @@ check_dependencies() {
         command -v "$dep" &>/dev/null || missing+=("$dep")
     done
     if [ ${#missing[@]} -ne 0 ]; then
-        print_status "ERROR" "Missing: ${missing[*]}"
+        print_status "ERROR" "Missing dependencies: ${missing[*]}"
+        print_status "INFO" "Install via dev.nix: pkgs.qemu, pkgs.cloud-utils, pkgs.wget"
         exit 1
     fi
 }
@@ -106,12 +104,11 @@ load_vm_config() {
     
     unset VM_NAME OS_TYPE CODENAME IMG_URL HOSTNAME USERNAME PASSWORD
     unset DISK_SIZE MEMORY CPUS SSH_PORT PORT_FORWARDS IMG_FILE SEED_FILE CREATED
-    unset ENABLE_VIRTIO_GPU DISK_CACHE NETWORK_MODEL IO_THREADS
+    unset DISK_CACHE NETWORK_MODEL IO_THREADS
     
     source "$config_file"
     
-    # DEFAULTS TO MAX PERFORMANCE
-    ENABLE_VIRTIO_GPU="${ENABLE_VIRTIO_GPU:-true}"
+    # MAX PERFORMANCE DEFAULTS
     DISK_CACHE="${DISK_CACHE:-writeback}"
     NETWORK_MODEL="${NETWORK_MODEL:-virtio-net-pci}"
     IO_THREADS="${IO_THREADS:-true}"
@@ -134,7 +131,6 @@ PORT_FORWARDS="$PORT_FORWARDS"
 IMG_FILE="$IMG_FILE"
 SEED_FILE="$SEED_FILE"
 CREATED="$CREATED"
-ENABLE_VIRTIO_GPU="$ENABLE_VIRTIO_GPU"
 DISK_CACHE="$DISK_CACHE"
 NETWORK_MODEL="$NETWORK_MODEL"
 IO_THREADS="$IO_THREADS"
@@ -142,86 +138,8 @@ EOF
     print_status "SUCCESS" "Configuration saved"
 }
 
-setup_xorg_dummy() {
-    print_status "INFO" "🎮 Setting up Xorg dummy..."
-    
-    # Find dummy driver
-    local dummy_driver=""
-    for path in /nix/store/*/lib/xorg/modules/drivers/dummy_drv.so; do
-        [ -f "$path" ] && dummy_driver="$path" && break
-    done
-    
-    if [ -z "$dummy_driver" ]; then
-        print_status "ERROR" "Dummy driver not found! Add: xorg.xf86videodummy to dev.nix"
-        return 1
-    fi
-    
-    # Create Xorg config
-    local xorg_conf="xorg-dummy-${VM_NAME}.conf"
-    cat > "$xorg_conf" <<'EOF'
-Section "ServerLayout"
-    Identifier "dummy_layout"
-    Screen 0 "dummy_screen"
-EndSection
-
-Section "Device"
-    Identifier "dummy_videocard"
-    Driver "dummy"
-    VideoRam 256000
-EndSection
-
-Section "Screen"
-    Identifier "dummy_screen"
-    Device "dummy_videocard"
-    Monitor "dummy_monitor"
-    DefaultDepth 24
-    SubSection "Display"
-        Depth 24
-        Modes "1920x1080"
-    EndSubSection
-EndSection
-
-Section "Monitor"
-    Identifier "dummy_monitor"
-    HorizSync 30.0-70.0
-    VertRefresh 50.0-75.0
-EndSection
-EOF
-    
-    # Find free display
-    local display_num=10
-    while [ -f "/tmp/.X${display_num}-lock" ]; do ((display_num++)); done
-    
-    print_status "INFO" "Starting Xorg :$display_num..."
-    Xorg :$display_num -config "$xorg_conf" -logfile "xorg-${VM_NAME}.log" &
-    local xorg_pid=$!
-    
-    sleep 3
-    
-    if ps -p $xorg_pid >/dev/null 2>&1; then
-        print_status "SUCCESS" "✓ Xorg started on :$display_num (PID: $xorg_pid)"
-        echo "$xorg_pid" > "xorg-${VM_NAME}.pid"
-        echo ":$display_num"
-        return 0
-    else
-        print_status "ERROR" "Xorg failed!"
-        [ -f "xorg-${VM_NAME}.log" ] && tail -20 "xorg-${VM_NAME}.log"
-        return 1
-    fi
-}
-
-stop_xorg_dummy() {
-    local pid_file="xorg-${VM_NAME}.pid"
-    if [ -f "$pid_file" ]; then
-        local xorg_pid=$(cat "$pid_file")
-        ps -p $xorg_pid >/dev/null 2>&1 && kill $xorg_pid 2>/dev/null
-        rm -f "$pid_file"
-    fi
-    rm -f "xorg-dummy-${VM_NAME}.conf" "xorg-${VM_NAME}.log"
-}
-
 create_new_vm() {
-    print_status "INFO" "🆕 Creating new VM"
+    print_status "INFO" "Creating new VM (virtio-vga-gl + Xorg dummy in VM)"
     
     # OS Selection
     print_status "INFO" "Select OS:"
@@ -273,22 +191,12 @@ create_new_vm() {
     read -p "$(print_status "INPUT" "SSH Port (default: 2222): ")" SSH_PORT
     SSH_PORT="${SSH_PORT:-2222}"
     
-    read -p "$(print_status "INPUT" "Port forwards (e.g., 8080:80): ")" PORT_FORWARDS
+    read -p "$(print_status "INPUT" "Port forwards (e.g., 8080:80,3389:3389 for RDP): ")" PORT_FORWARDS
 
-    # GPU - DEFAULT TO TRUE if available
-    if [ "$VIRGL_AVAILABLE" = true ]; then
-        ENABLE_VIRTIO_GPU=true
-        print_status "SUCCESS" "🎮 GPU acceleration ENABLED (virtio-gpu + virgl)"
-        print_status "INFO" "Xorg dummy will auto-install in VM"
-    else
-        ENABLE_VIRTIO_GPU=false
-        print_status "WARN" "GPU not available, using standard VGA"
-    fi
-    
-    # Performance defaults - ALL MAX
-    DISK_CACHE="writeback"  # Fastest
-    IO_THREADS=true         # Best I/O performance
-    NETWORK_MODEL="virtio-net-pci"  # Fastest network
+    # Performance defaults
+    DISK_CACHE="writeback"
+    IO_THREADS=true
+    NETWORK_MODEL="virtio-net-pci"
 
     IMG_FILE="$VM_DIR/$VM_NAME.img"
     SEED_FILE="$VM_DIR/$VM_NAME-seed.iso"
@@ -298,17 +206,20 @@ create_new_vm() {
     save_vm_config
     
     echo ""
-    print_status "SUCCESS" "⚡ VM Created with MAX PERFORMANCE"
-    echo "  ✓ CPU: $CPUS cores"
-    echo "  ✓ Memory: ${MEMORY}MB"
-    echo "  ✓ Disk: $DISK_SIZE (cache=$DISK_CACHE)"
-    echo "  ✓ I/O threads: ENABLED"
-    echo "  ✓ Network: virtio-net-pci"
-    [ "$ENABLE_VIRTIO_GPU" = true ] && echo "  ✓ GPU: virtio-gpu + virgl + Xorg dummy"
+    print_status "SUCCESS" "VM Created with MAX PERFORMANCE"
+    echo "  - CPU: $CPUS cores"
+    echo "  - Memory: ${MEMORY}MB"
+    echo "  - Disk: $DISK_SIZE (cache=$DISK_CACHE)"
+    echo "  - I/O threads: ENABLED"
+    echo "  - Network: virtio-net-pci"
+    echo "  - GPU: virtio-vga-gl (ALWAYS)"
+    echo "  - Display: Xorg dummy in VM (for RDP access)"
+    echo ""
+    print_status "INFO" "To use RDP: SSH in and run: sudo apt install xrdp -y"
 }
 
 setup_vm_image() {
-    print_status "INFO" "📦 Preparing image..."
+    print_status "INFO" "Preparing image..."
     
     mkdir -p "$VM_DIR"
     
@@ -323,7 +234,7 @@ setup_vm_image() {
     
     qemu-img resize "$IMG_FILE" "$DISK_SIZE" 2>/dev/null || qemu-img create -f qcow2 "$IMG_FILE" "$DISK_SIZE"
 
-    # Cloud-init
+    # Cloud-init: Setup Xorg dummy in VM for GPU + RDP
     cat > user-data <<EOF
 #cloud-config
 hostname: $HOSTNAME
@@ -339,17 +250,14 @@ chpasswd:
     root:$PASSWORD
     $USERNAME:$PASSWORD
   expire: false
-EOF
 
-    # Add Xorg dummy if GPU enabled
-    if [ "$ENABLE_VIRTIO_GPU" = true ]; then
-        cat >> user-data <<'XORG_EOF'
 packages:
   - xserver-xorg-core
   - xserver-xorg-video-dummy
   - x11-xserver-utils
   - mesa-utils
   - glmark2
+  - desktop-file-utils
 
 write_files:
   - path: /etc/X11/xorg.conf.d/20-dummy.conf
@@ -380,7 +288,7 @@ write_files:
   - path: /etc/systemd/system/xorg-dummy.service
     content: |
       [Unit]
-      Description=Xorg Dummy Display for GPU Acceleration
+      Description=Xorg Dummy Display for virtio-vga-gl
       After=network.target
       
       [Service]
@@ -391,15 +299,20 @@ write_files:
       
       [Install]
       WantedBy=multi-user.target
+  
+  - path: /etc/profile.d/display.sh
+    content: |
+      export DISPLAY=:0
 
 runcmd:
   - systemctl daemon-reload
   - systemctl enable xorg-dummy
   - systemctl start xorg-dummy
   - echo "export DISPLAY=:0" >> /etc/environment
-  - echo "🎮 GPU acceleration enabled with Xorg dummy" > /etc/motd
-XORG_EOF
-    fi
+  - echo "GPU: virtio-vga-gl with Xorg dummy display" > /etc/motd
+  - echo "To install RDP: sudo apt install xrdp -y" >> /etc/motd
+  - echo "Then connect via RDP to use desktop with GPU acceleration" >> /etc/motd
+EOF
 
     cat > meta-data <<EOF
 instance-id: iid-$VM_NAME
@@ -411,7 +324,7 @@ EOF
         exit 1
     }
     
-    print_status "SUCCESS" "✓ VM image ready"
+    print_status "SUCCESS" "VM image ready (Xorg dummy will auto-start in VM)"
 }
 
 build_qemu_command() {
@@ -429,7 +342,7 @@ build_qemu_command() {
     [ "$KVM_AVAILABLE" = true ] && machine_opts+=",accel=kvm"
     qemu_cmd+=(-machine "$machine_opts")
     
-    # Disk with I/O threads (MAX PERFORMANCE)
+    # Disk with I/O threads
     if [ "$IO_THREADS" = true ]; then
         local aio_mode="threads"
         [ "$DISK_CACHE" = "none" ] && aio_mode="native"
@@ -465,17 +378,14 @@ build_qemu_command() {
         done
     fi
     
-    # Display - GPU if enabled
-    if [ "$ENABLE_VIRTIO_GPU" = "true" ]; then
-        qemu_cmd+=(
-            -device "virtio-vga-gl"
-            -display "egl-headless"
-        )
-    else
-        qemu_cmd+=(-vga std)
-    fi
+    # GPU - ALWAYS virtio-vga-gl (NO vga std)
+    # Using -display none for headless operation (no X server needed on host)
+    qemu_cmd+=(
+        -device "virtio-vga-gl"
+        -display "none"
+    )
     
-    # Serial console (headless)
+    # Serial console for SSH access (headless)
     qemu_cmd+=(-nographic -serial mon:stdio)
     
     # Performance optimizations
@@ -495,55 +405,33 @@ start_vm() {
     local vm_name=$1
     load_vm_config "$vm_name" || return 1
     
-    print_status "INFO" "🚀 Starting VM: $vm_name"
+    print_status "INFO" "Starting VM: $vm_name"
     print_status "INFO" "SSH: ssh -p $SSH_PORT $USERNAME@localhost"
     print_status "INFO" "Password: $PASSWORD"
     
     [[ ! -f "$IMG_FILE" ]] && { print_status "ERROR" "Image not found"; return 1; }
     [[ ! -f "$SEED_FILE" ]] && setup_vm_image
     
-    # Setup Xorg if GPU enabled
-    local xorg_display=""
-    if [ "$ENABLE_VIRTIO_GPU" = true ] && [ "$VIRGL_AVAILABLE" = true ]; then
-        if ! command -v Xorg &>/dev/null; then
-            print_status "WARN" "Xorg not found, GPU disabled"
-            ENABLE_VIRTIO_GPU=false
-        elif [ -z "${DISPLAY:-}" ]; then
-            print_status "INFO" "🎮 Setting up Xorg dummy..."
-            xorg_display=$(setup_xorg_dummy)
-            if [ $? -eq 0 ]; then
-                export DISPLAY="$xorg_display"
-                print_status "SUCCESS" "✓ Xorg ready: $DISPLAY"
-            else
-                print_status "WARN" "Xorg failed, GPU disabled"
-                ENABLE_VIRTIO_GPU=false
-            fi
-        else
-            print_status "INFO" "Using DISPLAY: $DISPLAY"
-        fi
-    fi
-    
     local qemu_cmd=($(build_qemu_command))
     
-    print_status "INFO" "⚡ Performance Profile:"
-    [ "$KVM_AVAILABLE" = true ] && echo "  ✓ KVM acceleration"
-    echo "  ✓ CPU: $CPUS cores ($CPU_FEATURES)"
-    echo "  ✓ Memory: ${MEMORY}MB"
-    echo "  ✓ Disk: cache=$DISK_CACHE"
-    [ "$IO_THREADS" = true ] && echo "  ✓ I/O threads: enabled"
-    echo "  ✓ Network: $NETWORK_MODEL"
-    if [ "$ENABLE_VIRTIO_GPU" = true ]; then
-        echo "  ✓ GPU: virtio-gpu + virgl"
-        [ -n "$xorg_display" ] && echo "  ✓ Xorg: $xorg_display"
-    fi
+    print_status "INFO" "Performance Profile:"
+    [ "$KVM_AVAILABLE" = true ] && echo "  - KVM acceleration: ENABLED"
+    echo "  - CPU: $CPUS cores"
+    echo "  - Memory: ${MEMORY}MB"
+    echo "  - Disk cache: $DISK_CACHE"
+    [ "$IO_THREADS" = true ] && echo "  - I/O threads: ENABLED"
+    echo "  - Network: $NETWORK_MODEL"
+    echo "  - GPU: virtio-vga-gl (ALWAYS ENABLED)"
+    echo "  - Display: Xorg dummy in VM (no X needed on host)"
+    echo ""
+    print_status "INFO" "After boot: SSH in and install RDP if needed"
+    print_status "INFO" "  sudo apt install xrdp -y"
+    print_status "INFO" "  sudo systemctl enable xrdp"
+    print_status "INFO" "  sudo systemctl start xrdp"
     
     print_status "INFO" "Starting QEMU..."
     
-    [ -n "$xorg_display" ] && trap "stop_xorg_dummy" EXIT INT TERM
-    
     "${qemu_cmd[@]}"
-    
-    [ -n "$xorg_display" ] && stop_xorg_dummy
     
     print_status "INFO" "VM stopped"
 }
@@ -591,10 +479,11 @@ show_vm_info() {
     echo "  Port forwards: ${PORT_FORWARDS:-None}"
     echo ""
     echo "Performance:"
-    echo "  Cache: $DISK_CACHE"
+    echo "  Disk cache: $DISK_CACHE"
     echo "  I/O threads: $IO_THREADS"
-    echo "  GPU: $ENABLE_VIRTIO_GPU"
     echo "  Network: $NETWORK_MODEL"
+    echo "  GPU: virtio-vga-gl (ALWAYS)"
+    echo "  Display: Xorg dummy in VM"
     echo ""
     echo "Created: $CREATED"
     echo "========================================"
@@ -615,22 +504,22 @@ main_menu() {
         if [ $vm_count -gt 0 ]; then
             print_status "INFO" "$vm_count VM(s):"
             for i in "${!vms[@]}"; do
-                local status="⭕ Stopped"
-                is_vm_running "${vms[$i]}" && status="✅ Running"
-                printf "  %2d) %-20s %s\n" $((i+1)) "${vms[$i]}" "$status"
+                local status="Stopped"
+                is_vm_running "${vms[$i]}" && status="Running"
+                printf "  %2d) %-20s [%s]\n" $((i+1)) "${vms[$i]}" "$status"
             done
             echo
         fi
         
         echo "Menu:"
-        echo "  1) 🆕 Create VM (GPU DEFAULT)"
+        echo "  1) Create VM (virtio-vga-gl + RDP ready)"
         [ $vm_count -gt 0 ] && cat <<EOF
-  2) 🚀 Start VM
-  3) ⏹️  Stop VM
-  4) ℹ️  VM Info
-  5) 🗑️  Delete VM
+  2) Start VM
+  3) Stop VM
+  4) VM Info
+  5) Delete VM
 EOF
-        echo "  0) 🚪 Exit"
+        echo "  0) Exit"
         echo
         
         read -p "Choice: " choice
@@ -666,7 +555,7 @@ EOF
                 fi
                 ;;
             0)
-                print_status "INFO" "👋 Goodbye!"
+                print_status "INFO" "Goodbye!"
                 exit 0
                 ;;
         esac
