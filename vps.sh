@@ -2,7 +2,6 @@
 set -euo pipefail
 
 # =============================
-# MAX PERFORMANCE Multi-VM Manager
 # Optimized for IDX Google / High Performance VMs
 # =============================
 
@@ -263,10 +262,13 @@ create_new_vm() {
     done
 
     while true; do
-        read -p "$(print_status "INPUT" "CPUs (default: 4, max: $CPU_CORES): ")" CPUS
+        read -p "$(print_status "INPUT" "CPUs (default: 4, host has: $CPU_CORES): ")" CPUS
         CPUS="${CPUS:-4}"
         if validate_input "number" "$CPUS"; then
-            [ "$CPUS" -gt "$CPU_CORES" ] && CPUS=$CPU_CORES
+            if [ "$CPUS" -gt "$CPU_CORES" ]; then
+                print_status "WARN" "Allocating $CPUS vCPUs (host has $CPU_CORES physical cores)"
+                print_status "INFO" "This may cause overcommit but is allowed"
+            fi
             break
         fi
     done
